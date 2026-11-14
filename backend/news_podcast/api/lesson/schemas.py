@@ -44,6 +44,41 @@ class TopicChoice(BaseModel):
     )
 
 
+class SearchResult(NamedTuple):
+    """A search result that counts: a trusted host and enough text."""
+
+    url: str
+    title: str
+    site: str
+    published: str | None
+    excerpt: str
+    text: str
+
+
+class LessonPage(NamedTuple):
+    """A page the lesson rests on, its text cut to MAX_PAGE_CHARS."""
+
+    title: str
+    site: str
+    url: str
+    published: str | None
+    text: str
+
+
+class PagePick(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+    pages: list[StrictInt] = Field(
+        description="Os números das páginas escolhidas, da melhor para a pior; "
+        "vazio quando nenhuma serve."
+    )
+    terms: str = Field(
+        max_length=300,
+        description="Outros termos de busca quando faltam duas páginas boas e atuais; "
+        "vazio quando as páginas escolhidas bastam.",
+    )
+
+
 @dataclass(frozen=True)
 class LessonOptions:
     """The lesson settings the nodes read, with the speech speed from Settings."""

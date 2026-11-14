@@ -13,6 +13,13 @@ from langgraph.runtime import Runtime
 
 from news_podcast.api.core.schemas import Usage
 from news_podcast.api.lesson.config import MAX_LESSON_MINUTES, MAX_LESSON_STEPS
+from news_podcast.api.lesson.sources import (
+    after_pick,
+    keep_pages,
+    next_topic,
+    pick_pages,
+    search,
+)
 from news_podcast.api.lesson.state import LessonContext, LessonError, LessonState
 from news_podcast.api.lesson.topics import choose_topic
 
@@ -25,6 +32,10 @@ LessonGraph = CompiledStateGraph[LessonState, LessonContext, LessonState, Lesson
 # Each node, the step the history names when it fails, and its function.
 NODES: tuple[tuple[str, str, Node], ...] = (
     ("choose_topic", "escolha do tema", choose_topic),
+    ("search", "busca das fontes", search),
+    ("pick_pages", "busca das fontes", pick_pages),
+    ("next_topic", "busca das fontes", next_topic),
+    ("keep_pages", "busca das fontes", keep_pages),
 )
 
 
@@ -47,7 +58,20 @@ def build_graph() -> LessonGraph:
     for name, step, node in NODES:
         add_node(graph, name, step, node)
     graph.add_edge(START, "choose_topic")
-    graph.add_edge("choose_topic", END)
+    graph.add_edge("choose_topic", "search")
+    graph.add_edge("search", "pick_pages")
+    # The path map's keys label the drawing's edges.
+    graph.add_conditional_edges(
+        "pick_pages",
+        after_pick,
+        {
+            "other_terms": "search",
+            "enough_pages": "keep_pages",
+            "too_few_pages": "next_topic",
+        },
+    )
+    graph.add_edge("next_topic", "search")
+    graph.add_edge("keep_pages", END)
     return graph.compile()
 
 
