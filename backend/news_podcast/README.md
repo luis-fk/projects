@@ -182,21 +182,28 @@ admin.
 ## Lesson sources
 
 Each lesson searches for its pages with Tavily when it is made (`api/lesson/sources.py`),
-only on the trusted sites of `LESSON_SOURCE_DOMAINS` (`api/lesson/config.py`): `leg.br`
-(the Câmara, the Senado and the Congresso), `jus.br` (the courts, the TSE included),
-`gov.br` (the federal government, with the Banco Central, the IBGE and the Tesouro),
-Politize! and Agência Brasil. Wikipedia isn't on the list, and neither is ICL Notícias:
-a search covers a whole site, opinion pieces included. The code checks each result's
-host again and keeps only pages with enough text; nothing is downloaded, since the
-text comes from Tavily.
+only on the trusted sites of `LESSON_SOURCE_DOMAINS` (`api/lesson/config.py`), each
+with its subdomains:
+
+- `leg.br`: the Câmara, the Senado and the Congresso, and the state and city
+  legislatures too;
+- `jus.br`: the courts, the TSE included;
+- `gov.br`: the federal government, with the Banco Central, the IBGE and the Tesouro,
+  and the state and city governments too;
+- Politize! and Agência Brasil.
+
+The pick leaves out pages about something else. Wikipedia isn't on the list, by the
+owner's choice. Neither is ICL Notícias: a search covers its whole site, opinion
+pieces included. The code checks each result's host again and keeps only pages with
+text. Nothing is downloaded, since the text comes from Tavily.
 
 - **The pick:** a text model picks up to 3 pages, best first, and may ask for one more
   search with other words.
 - **At least 2 pages:** with fewer, the next topic is tried, with a warning to the
   admin chat naming the skipped one. A lesson searches at most 2 topics, twice each, so
   it spends 8 Tavily credits at most; the history doesn't count them.
-- **Key:** lessons need `TAVILY_API_KEY` (in the local `.env`, and on the cron service
-  for scheduled lessons). Without it, or when Tavily fails, there is no lesson that day.
+- **Key:** the search needs `TAVILY_API_KEY`. Without it, or when Tavily fails, the
+  lesson fails at "busca das fontes".
 
 ## Lesson graph
 

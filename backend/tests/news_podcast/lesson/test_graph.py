@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -10,14 +10,18 @@ from tavily.errors import UsageLimitExceededError
 
 from news_podcast.api.core.config import TEXT_RETRY_MINUTES, VOICE_RETRY_MINUTES
 from news_podcast.api.core.llm import TextError, TextModels
+from news_podcast.api.core.telegram import TelegramClient, TelegramError
 from news_podcast.api.lesson import graph
 from news_podcast.api.lesson.config import MAX_LESSON_MINUTES, MAX_LESSON_STEPS
 from news_podcast.api.lesson.graph import LESSON_GRAPH, LessonOutcome, run_graph
+from news_podcast.api.lesson.messages import admin_warner
 from news_podcast.api.lesson.schemas import CatalogTopic, TopicToTry
 from news_podcast.api.lesson.sources import SearchError
-from news_podcast.api.lesson.state import LessonError, LessonState
+from news_podcast.api.lesson.state import LessonError, LessonState, Warn
+from tests.news_podcast.fake_models import FakeChatModel
 from tests.news_podcast.lesson.context import (
     CATALOG,
+    MODEL,
     POWERS,
     STORIES,
     VETO,
@@ -25,6 +29,7 @@ from tests.news_podcast.lesson.context import (
     answer,
     found,
     lesson_context,
+    offline_client,
     search_result,
 )
 
@@ -52,11 +57,19 @@ def run(
     answers: list[Any],
     search: FakeSearch | None = None,
     warnings: list[str] | None = None,
+    built: dict[str, FakeChatModel] | None = None,
+    warn: Callable[[httpx.AsyncClient], Warn] | None = None,
 ) -> LessonOutcome:
     async def scenario() -> LessonOutcome:
-        async with httpx.AsyncClient() as client:
+        async with offline_client() as client:
             context = lesson_context(
-                client, catalog, answers=answers, search=search, warnings=warnings
+                client,
+                catalog,
+                answers=answers,
+                search=search,
+                warnings=warnings,
+                built=built,
+                warn=warn(client) if warn else None,
             )
             return await run_graph(INPUTS, context)
 
@@ -98,11 +111,12 @@ def test_one_good_search_settles_the_topic_and_its_pages() -> None:
     assert outcome.state["stories"] == STORIES
 
 
-def test_other_terms_bring_one_more_search_with_each_url_once() -> None:
-    fake = FakeSearch(found(PAGES[0]), found(PAGES[0], PAGES[1], PAGES[2]))
+def test_other_terms_bring_one_more_search_whose_pick_sees_every_result() -> None:
+    fake = FakeSearch(found(PAGES[0]), found(PAGES[1], PAGES[2], PAGES[0]))
     answers = [answer(3, 2), pick([1], "derrubada de veto"), pick([1, 2, 3])]
+    built: dict[str, FakeChatModel] = {}
 
-    outcome = run(CATALOG, answers, fake)
+    outcome = run(CATALOG, answers, fake, built=built)
 
     assert outcome.path == [
         "choose_topic",
@@ -116,6 +130,9 @@ def test_other_terms_bring_one_more_search_with_each_url_once() -> None:
     assert [result.url for result in outcome.state["results"]] == [
         page["url"] for page in PAGES
     ]
+    second_pick = str(built[MODEL].received[2][1].content)
+    assert [line[:3] for line in second_pick.splitlines()[1:]] == ["1. ", "2. ", "3. "]
+    assert "Entenda o veto" in second_pick
 
 
 def test_terms_on_the_second_pick_start_no_third_search() -> None:
@@ -149,6 +166,29 @@ def test_a_topic_short_of_pages_gives_way_to_the_next_with_one_warning() -> None
     assert fake.calls[1][0] == POWERS.title
     assert len(warnings) == 1
     assert VETO.title in warnings[0]
+
+
+class RefusingTelegram(TelegramClient):
+    async def send_message(self, chat_id: str, text: str) -> None:
+        raise TelegramError("bot bloqueado")
+
+
+def test_a_refused_warning_never_stops_the_lesson(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeSearch(found(PAGES[0]), found(*PAGES))
+    answers = [answer(3, 2), pick([1]), pick([1, 2, 3])]
+
+    outcome = run(
+        CATALOG,
+        answers,
+        fake,
+        warn=lambda client: admin_warner(RefusingTelegram(client, "token"), "123"),
+    )
+
+    assert outcome.error is None
+    assert outcome.path[-1] == "keep_pages"
+    assert "bot bloqueado" in caplog.text
 
 
 def test_two_topics_short_of_pages_fail_the_lesson_with_no_warning() -> None:

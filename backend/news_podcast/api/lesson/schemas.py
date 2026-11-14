@@ -8,6 +8,7 @@ from typing import NamedTuple
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from news_podcast.api.core.schemas import NewsStory
+from news_podcast.api.lesson.config import MIN_LESSON_PAGES
 
 
 class CatalogTopic(NamedTuple):
@@ -56,12 +57,14 @@ class SearchResult(NamedTuple):
 
 
 class LessonPage(NamedTuple):
-    """A page the lesson rests on, its text cut to MAX_PAGE_CHARS."""
+    """A page the lesson rests on: the excerpt the pick judged it by, and its text
+    from the start, cut to MAX_PAGE_CHARS, so the excerpt may lie past the cut."""
 
     title: str
     site: str
     url: str
     published: str | None
+    excerpt: str
     text: str
 
 
@@ -74,8 +77,8 @@ class PagePick(BaseModel):
     )
     terms: str = Field(
         max_length=300,
-        description="Outros termos de busca quando faltam duas páginas boas e atuais; "
-        "vazio quando as páginas escolhidas bastam.",
+        description=f"Outros termos de busca quando faltam {MIN_LESSON_PAGES} páginas "
+        "boas e atuais; vazio quando as páginas escolhidas bastam.",
     )
 
 

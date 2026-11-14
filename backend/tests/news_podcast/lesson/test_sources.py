@@ -48,11 +48,13 @@ from tests.news_podcast.lesson.context import (
     CATALOG,
     MODEL,
     POWERS,
+    STJ,
     STORIES,
     VETO,
     FakeSearch,
     found,
     lesson_context,
+    offline_client,
     search_result,
 )
 
@@ -86,7 +88,7 @@ def run_node(
 ) -> tuple[LessonState, LessonContext, dict[str, FakeChatModel]]:
     async def scenario() -> tuple[LessonState, LessonContext, dict[str, FakeChatModel]]:
         built: dict[str, FakeChatModel] = {}
-        async with httpx.AsyncClient() as client:
+        async with offline_client() as client:
             context = lesson_context(
                 client,
                 CATALOG,
@@ -161,6 +163,10 @@ def test_a_result_without_text_is_dropped_without_an_error() -> None:
         ("", None),
         (None, None),
         ("ontem", "ontem"),
+        (
+            "Mon, 1 Jan 99999999999999999999 00:00:00 GMT",
+            "Mon, 1 Jan 99999999999999999999 00:00:00 GMT",
+        ),
     ],
 )
 def test_a_published_date_reads_as_a_day(
@@ -199,16 +205,74 @@ def test_a_result_without_a_title_goes_by_its_url() -> None:
     assert result.title == SENADO["url"]
 
 
-def test_a_second_search_asks_for_the_terms_and_keeps_each_url_once() -> None:
+def test_a_second_search_asks_for_the_terms_and_keeps_the_first_results() -> None:
     first, _, _ = run_node(search, START, search_client=FakeSearch(found(SENADO)))
     again: LessonState = {**START, **first, "terms": "derrubada de veto presidencial"}
-    fake = FakeSearch(found(SENADO, CAMARA))
+    fake = FakeSearch(found(CAMARA))
 
     state, _, _ = run_node(search, again, search_client=fake)
 
     assert fake.calls[0][0] == "derrubada de veto presidencial"
     assert [result.url for result in state["results"]] == [SENADO["url"], CAMARA["url"]]
     assert (state["searches"], state["terms"]) == (2, "")
+
+
+def test_the_same_page_under_another_url_counts_once() -> None:
+    first, _, _ = run_node(search, START, search_client=FakeSearch(found(SENADO)))
+    again: LessonState = {**START, **first, "terms": "veto"}
+    variants = [
+        search_result(url=SENADO["url"] + "/"),
+        search_result(url=SENADO["url"] + "#topo"),
+        search_result(url=SENADO["url"].replace("www12.senado", "WWW12.Senado")),
+    ]
+
+    state, _, _ = run_node(search, again, search_client=FakeSearch(found(*variants)))
+
+    assert [result.url for result in state["results"]] == [SENADO["url"]]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[gov.br/x",
+        "javascript://www.gov.br/x",
+        "ftp://www.gov.br/x",
+        "https://evil.example\\@www.gov.br/x",
+        7,
+        None,
+    ],
+)
+def test_an_odd_url_never_counts_nor_fails_the_search(url: Any) -> None:
+    assert counted_result(search_result(url=url)) is None
+
+
+def test_a_title_that_isn_t_text_goes_by_the_url() -> None:
+    result = counted_result(search_result(title=7))
+
+    assert result is not None
+    assert result.title == SENADO["url"]
+
+
+def test_a_response_that_isn_t_an_object_is_a_search_error() -> None:
+    with pytest.raises(SearchError):
+        run_node(search, START, search_client=FakeSearch(["não é um objeto"]))
+
+
+def test_a_body_that_isn_t_json_is_a_search_error() -> None:
+    broken = json.JSONDecodeError("Expecting value", "<html>", 0)
+
+    with pytest.raises(SearchError):
+        run_node(search, START, search_client=FakeSearch(broken))
+
+
+def test_a_result_that_isn_t_an_object_is_skipped() -> None:
+    state, _, _ = run_node(
+        search,
+        START,
+        search_client=FakeSearch(found("lixo", SENADO)),  # type: ignore[arg-type]
+    )
+
+    assert [result.url for result in state["results"]] == [SENADO["url"]]
 
 
 @pytest.mark.parametrize(
@@ -260,6 +324,26 @@ def test_the_pick_gets_the_prompt_and_the_results_but_never_their_text() -> None
     )
     assert "Texto da página" not in str(human.content)
     assert [usage.step for usage in context.progress.usages] == ["pick"]
+
+
+def test_each_result_takes_one_line_in_the_pick_and_an_untitled_one_its_url() -> None:
+    messy = search_result(
+        title="Entenda\no veto",
+        content="### Passo a passo\n\n1. O presidente veta\n2. O Congresso vota [...]",
+    )
+    untitled = search_result(url="https://www.camara.leg.br/sem-titulo", title=None)
+    state = searched(messy, untitled)
+
+    _, _, built = run_node(pick_pages, state, answers=[pick([1, 2])])
+
+    human = str(built[MODEL].received[0][1].content)
+    assert human.splitlines() == [
+        "Resultados da busca:",
+        "1. Entenda o veto (www12.senado.leg.br, 2025-03-10): ### Passo a passo 1. O "
+        "presidente veta 2. O Congresso vota [...]",
+        "2. https://www.camara.leg.br/sem-titulo (www.camara.leg.br, 2025-03-10): O "
+        "veto é a recusa do presidente a um projeto.",
+    ]
 
 
 def test_the_pick_is_asked_even_with_no_result() -> None:
@@ -337,6 +421,7 @@ def test_keep_pages_cuts_each_text_and_settles_the_topic() -> None:
             site="www12.senado.leg.br",
             url=SENADO["url"],
             published="2025-03-10",
+            excerpt=SENADO["content"],
             text="a" * MAX_PAGE_CHARS,
         ),
         LessonPage(
@@ -344,6 +429,7 @@ def test_keep_pages_cuts_each_text_and_settles_the_topic() -> None:
             site="www.camara.leg.br",
             url=CAMARA["url"],
             published=None,
+            excerpt=CAMARA["content"],
             text=CAMARA["raw_content"],
         ),
     ]
@@ -395,7 +481,14 @@ def test_next_topic_starts_the_next_topic_and_remembers_the_skipped_one() -> Non
 
 
 def test_next_topic_gives_up_after_the_topics_it_may_try() -> None:
-    state: LessonState = {**START, **topic_start(1), "skipped": [VETO.title]}
+    # A third topic is left, so only MAX_TOPICS_PER_LESSON can stop the walk.
+    three = [*TOPICS, TopicToTry(STJ, None)]
+    state: LessonState = {
+        **START,
+        **topic_start(1),
+        "topics": three,
+        "skipped": [VETO.title],
+    }
 
     with pytest.raises(LessonError) as caught:
         run_node(next_topic, state)

@@ -72,7 +72,9 @@ async def search(state: LessonState, context: LessonContext) -> LessonState:
     return {"results": results, "searches": state.get("searches", 0) + 1, "terms": ""}
 
 
-async def run_search(client: SearchClient | None, query: str) -> list[Any]:
+async def run_search(
+    client: SearchClient | None, query: str
+) -> list[Mapping[str, Any]]:
     if client is None:
         raise SearchError("TAVILY_API_KEY não configurada")
     try:
@@ -84,33 +86,66 @@ async def run_search(client: SearchClient | None, query: str) -> list[Any]:
             include_raw_content=True,
             include_published_date=True,
         )
-    except SEARCH_FAILURES as error:
+    # A ValueError is a body that isn't JSON.
+    except (*SEARCH_FAILURES, ValueError) as error:
         raise SearchError(
             f"busca do Tavily falhou ({type(error).__name__}): {error}"
         ) from error
-    return list(response.get("results") or [])
+    if not isinstance(response, dict):
+        raise SearchError("busca do Tavily falhou: a resposta não é um objeto")
+    results = response.get("results")
+    if not isinstance(results, list):
+        return []
+    return [raw for raw in results if isinstance(raw, Mapping)]
 
 
 def counted_result(raw: Mapping[str, Any]) -> SearchResult | None:
-    """The result, when its host is a trusted site or a subdomain of one and its text
-    is long enough; Tavily's filter only narrows the search."""
-    url = raw.get("url") or ""
-    site = (urlsplit(url).hostname or "").lower()
-    trusted = any(
-        site == domain or site.endswith(f".{domain}")
-        for domain in LESSON_SOURCE_DOMAINS
-    )
-    text = raw.get("raw_content")
-    if not trusted or not isinstance(text, str) or len(text) < MIN_PAGE_CHARS:
+    """The result, when it is a web page on a trusted site, or a subdomain of one,
+    with text long enough; Tavily's filter only narrows the search. Nothing odd in a
+    result fails the search: it just doesn't count."""
+    url = raw.get("url")
+    if not isinstance(url, str):
         return None
+    site = trusted_site(url)
+    text = raw.get("raw_content")
+    if site is None or not isinstance(text, str) or len(text) < MIN_PAGE_CHARS:
+        return None
+    title = raw.get("title")
+    excerpt = raw.get("content")
     return SearchResult(
         url=url,
-        title=raw.get("title") or url,
+        title=title if isinstance(title, str) and title.strip() else url,
         site=site,
         published=published_day(raw.get("published_date")),
-        excerpt=raw.get("content") or "",
+        excerpt=excerpt if isinstance(excerpt, str) else "",
         text=text,
     )
+
+
+def trusted_site(url: str) -> str | None:
+    """The URL's host, when it is an http or https address on a trusted site. A
+    backslash is refused, since browsers read it as a slash while urlsplit doesn't."""
+    if "\\" in url:
+        return None
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https"):
+        return None
+    trusted = any(
+        host == domain or host.endswith(f".{domain}")
+        for domain in LESSON_SOURCE_DOMAINS
+    )
+    return host if trusted else None
+
+
+def page_key(url: str) -> tuple[str, str, str]:
+    """A page's identity: its host, its path without a trailing slash, and its query.
+    The scheme and a fragment don't make another page."""
+    parts = urlsplit(url)
+    return ((parts.hostname or "").lower(), parts.path.rstrip("/"), parts.query)
 
 
 def published_day(value: Any) -> str | None:
@@ -120,7 +155,7 @@ def published_day(value: Any) -> str | None:
         return None
     try:
         return parsedate_to_datetime(value).date().isoformat()
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         pass
     try:
         return date.fromisoformat(value[:10]).isoformat()
@@ -131,12 +166,12 @@ def published_day(value: Any) -> str | None:
 def merged(
     earlier: Sequence[SearchResult], new: Sequence[SearchResult]
 ) -> list[SearchResult]:
-    """The earlier results, then the new ones, each URL once."""
+    """The earlier results, then the new ones, each page once."""
     results = list(earlier)
-    seen = {result.url for result in results}
+    seen = {page_key(result.url) for result in results}
     for result in new:
-        if result.url not in seen:
-            seen.add(result.url)
+        if (key := page_key(result.url)) not in seen:
+            seen.add(key)
             results.append(result)
     return results
 
@@ -168,12 +203,18 @@ def pick_material(results: Sequence[SearchResult]) -> str:
     lines = ["Resultados da busca:"]
     if not results:
         lines.append("Nenhum resultado dos sites confiáveis.")
+    # One line per result, since the pick answers by number: Tavily's excerpts have
+    # line breaks, headings and numbered lines of their own.
     lines += [
-        f"{number}. {result.title} ({result.site}, {result.published or 'sem data'}): "
-        f"{result.excerpt}"
+        f"{number}. {one_line(result.title)} ({result.site}, "
+        f"{one_line(result.published or 'sem data')}): {one_line(result.excerpt)}"
         for number, result in enumerate(results, start=1)
     ]
     return "\n".join(lines)
+
+
+def one_line(text: str) -> str:
+    return " ".join(text.split())
 
 
 def checked_pick(results: Sequence[SearchResult]) -> Callable[[PagePick], Pick]:
@@ -224,6 +265,7 @@ async def keep_pages(state: LessonState, context: LessonContext) -> LessonState:
             site=result.site,
             url=result.url,
             published=result.published,
+            excerpt=result.excerpt,
             text=result.text[:MAX_PAGE_CHARS],
         )
         for result in state.get("picked", [])

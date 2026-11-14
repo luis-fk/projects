@@ -8,7 +8,12 @@ import httpx
 from news_podcast.api.core.llm import TextModels
 from news_podcast.api.core.schemas import NewsStory, Usage
 from news_podcast.api.lesson.schemas import CatalogTopic, LessonOptions
-from news_podcast.api.lesson.state import LessonContext, LessonProgress, SearchClient
+from news_podcast.api.lesson.state import (
+    LessonContext,
+    LessonProgress,
+    SearchClient,
+    Warn,
+)
 from tests.news_podcast.factories import build_lesson_options, catalog_topic
 from tests.news_podcast.fake_models import FakeChatModel, fake_factory
 
@@ -67,7 +72,7 @@ class FakeSearch:
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
-        return dict(response)
+        return response  # type: ignore[no-any-return]
 
 
 def search_result(**changes: Any) -> dict[str, Any]:
@@ -86,6 +91,15 @@ def found(*results: dict[str, Any]) -> dict[str, Any]:
     return {"query": "", "results": list(results)}
 
 
+def no_network(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"unexpected request to {request.url}")
+
+
+def offline_client() -> httpx.AsyncClient:
+    """An httpx client that fails any request, so a test proves none is made."""
+    return httpx.AsyncClient(transport=httpx.MockTransport(no_network))
+
+
 def lesson_context(
     client: httpx.AsyncClient,
     catalog: Sequence[CatalogTopic],
@@ -97,11 +111,12 @@ def lesson_context(
     usages: Sequence[Usage] = (),
     search: SearchClient | None = None,
     warnings: list[str] | None = None,
+    warn: Warn | None = None,
 ) -> LessonContext:
     """A lesson run's context over the fake chat model, which gives `answers` in
     order, and the fake search; the warnings land in `warnings`."""
 
-    async def warn(text: str) -> None:
+    async def record(text: str) -> None:
         if warnings is not None:
             warnings.append(text)
 
@@ -119,5 +134,5 @@ def lesson_context(
         text=text,
         progress=progress,
         search=search,
-        warn=warn,
+        warn=warn or record,
     )

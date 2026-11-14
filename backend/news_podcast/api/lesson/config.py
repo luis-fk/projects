@@ -24,7 +24,8 @@ MAX_SEARCHES = 2
 MAX_TOPICS_PER_LESSON = 2
 MIN_LESSON_PAGES = 2
 MAX_LESSON_PAGES = 3
-# Shorter is a stub or an index page; longer is cut, so three pages stay near 11,000
-# input tokens per request.
+# Tavily's text includes the site's menus, so the minimum only drops empty or failed
+# extractions, and the pick leaves out the thin pages. Longer texts are cut, so three
+# pages stay near 11,000 input tokens per request.
 MIN_PAGE_CHARS = 1_000
 MAX_PAGE_CHARS = 15_000
