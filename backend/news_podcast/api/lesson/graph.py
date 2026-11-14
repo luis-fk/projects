@@ -68,7 +68,8 @@ class LessonOutcome:
 
 async def run_graph(inputs: LessonState, context: LessonContext) -> LessonOutcome:
     """Runs the lesson within its time and step limits, keeping the latest state, so
-    a failure still has what the earlier nodes found. It raises nothing."""
+    a failure still has what the earlier nodes found. A failure comes back in the
+    outcome; only a cancellation from outside goes through."""
     state = inputs
     error: Exception | None = None
     limit = asyncio.timeout(MAX_LESSON_MINUTES * 60)

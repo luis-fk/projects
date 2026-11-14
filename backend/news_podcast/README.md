@@ -184,7 +184,6 @@ admin.
 The lesson runs as a LangGraph graph (`api/lesson/graph.py`, the only module that
 imports langgraph). Each node is an async function of the lesson's state and the
 run's context, and a failure keeps the step it happened at and the cost paid so far.
-Today the graph only chooses the topic; the next steps join it as they are built.
 
 ```mermaid
 ---

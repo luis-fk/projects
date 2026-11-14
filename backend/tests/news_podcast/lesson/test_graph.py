@@ -25,20 +25,30 @@ README = Path(graph.__file__).resolve().parents[2] / "README.md"
 INPUTS: LessonState = {"stories": STORIES, "news_sent": True, "send": False}
 
 
+# A broken time limit fails the test instead of hanging it.
+TEST_SECONDS = 10
+
+
 def run(catalog: list[CatalogTopic], answers: list[Any]) -> LessonOutcome:
     async def scenario() -> LessonOutcome:
         async with httpx.AsyncClient() as client:
             context = lesson_context(client, catalog, answers=answers)
             return await run_graph(INPUTS, context)
 
-    return asyncio.run(scenario())
+    return asyncio.run(asyncio.wait_for(scenario(), TEST_SECONDS))
+
+
+def readme_diagram() -> str:
+    readme = README.read_text(encoding="utf-8")
+    section = readme.split("## Lesson graph\n", 1)[1].split("\n## ", 1)[0]
+    return section.split("```mermaid\n", 1)[1].split("```", 1)[0]
 
 
 def test_the_readme_shows_the_graph_as_it_is() -> None:
     drawing = LESSON_GRAPH.get_graph()
 
     assert set(drawing.nodes) == {"__start__", "choose_topic", "__end__"}
-    assert drawing.draw_mermaid() in README.read_text(encoding="utf-8")
+    assert readme_diagram() == drawing.draw_mermaid()
 
 
 def test_a_run_takes_the_topic_step_and_keeps_its_topics() -> None:
@@ -80,12 +90,23 @@ def test_the_time_limit_cancels_the_running_node(
     monkeypatch.setattr(TextModels, "ask", never)
     monkeypatch.setattr(graph, "MAX_LESSON_MINUTES", 0.001)
 
-    outcome = run(CATALOG, [])
+    async def scenario() -> tuple[LessonOutcome, list[bool], int]:
+        async with httpx.AsyncClient() as client:
+            outcome = await run_graph(INPUTS, lesson_context(client, CATALOG))
+        await asyncio.sleep(0)
+        # Read before asyncio.run ends, since it cancels whatever is left on its own.
+        left = len(asyncio.all_tasks()) - 1
+        return outcome, list(cancelled), left
+
+    outcome, cancelled_by_then, left = asyncio.run(
+        asyncio.wait_for(scenario(), TEST_SECONDS)
+    )
 
     assert isinstance(outcome.error, LessonError)
     assert str(outcome.error) == "A aula passou de 0.001 minutos"
     assert outcome.step == "escolha do tema"
-    assert cancelled == [True]
+    assert cancelled_by_then == [True]
+    assert left == 0
 
 
 def test_a_timeout_inside_a_node_keeps_its_own_error(

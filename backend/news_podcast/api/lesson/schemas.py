@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from news_podcast.api.core.schemas import NewsStory
 
@@ -34,11 +34,12 @@ class TopicToTry(NamedTuple):
 class TopicChoice(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True)
 
-    candidate: int = Field(
+    # Strict, so a JSON true never reads as 1.
+    candidate: StrictInt = Field(
         description="O número do tema escolhido na lista de candidatos, ou 0 quando "
         "nenhum se liga claramente a uma notícia."
     )
-    story: int = Field(
+    story: StrictInt = Field(
         description="O número da notícia a que o tema escolhido se liga, ou 0."
     )
 

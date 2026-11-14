@@ -505,8 +505,9 @@ def test_without_a_lesson_row_load_says_to_run_the_seed_and_creates_none() -> No
 def test_the_catalog_snapshot_has_each_topic_with_its_sao_paulo_taught_date() -> None:
     justice = create_area(name="Justiça", position=2)
     congress = create_area(name="O Congresso e as leis", position=1)
-    veto = create_topic(congress, title="Como o Congresso derruba um veto", position=11)
+    # Created out of teaching order, so only the query's order can sort them.
     create_topic(justice, title="O STF: o que julga", position=2, active=False)
+    veto = create_topic(congress, title="Como o Congresso derruba um veto", position=11)
     sent = create_lesson_row(veto, started_at=datetime(2026, 11, 13, 1, 30, tzinfo=UTC))
     create_lesson_row(veto, status=Episode.Status.FAILED)
 

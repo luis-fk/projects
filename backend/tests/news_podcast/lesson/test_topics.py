@@ -7,6 +7,7 @@ import pytest
 
 from news_podcast.api.core.config import TEXT_RETRY_MINUTES
 from news_podcast.api.core.schemas import NewsStory
+from news_podcast.api.lesson.prompts import CHOICE_FIELDS
 from news_podcast.api.lesson.schemas import CatalogTopic, TopicToTry
 from news_podcast.api.lesson.state import LessonContext, LessonError, LessonState
 from news_podcast.api.lesson.topics import candidates, choose_topic, fallback_order
@@ -192,7 +193,8 @@ def test_the_choice_gets_the_prompt_the_candidates_and_the_numbered_stories() ->
 
 
 def test_every_choice_placeholder_is_filled() -> None:
-    options = build_lesson_options(choice_prompt="Hoje é {today}.")
+    prompt = " ".join(f"{{{name}}}" for name in CHOICE_FIELDS)
+    options = build_lesson_options(choice_prompt=prompt)
 
     async def scenario() -> str:
         built: dict[str, FakeChatModel] = {}
@@ -203,7 +205,7 @@ def test_every_choice_placeholder_is_filled() -> None:
             await choose_topic({"stories": STORIES}, context)
         return str(built[MODEL].received[0][0].content)
 
-    assert asyncio.run(scenario()) == "Hoje é sábado, 14 de novembro de 2026."
+    assert asyncio.run(scenario()) == "sábado, 14 de novembro de 2026"
 
 
 @pytest.mark.parametrize(
@@ -220,7 +222,24 @@ def test_every_choice_placeholder_is_filled() -> None:
 def test_with_no_candidate_the_choice_fails_without_a_request(
     catalog: list[CatalogTopic], message: str
 ) -> None:
-    with pytest.raises(LessonError, match=message) as error:
-        choose(catalog, STORIES, [])
+    asked: list[str] = []
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            context = lesson_context(client, catalog, asked=asked)
+            await choose_topic({"stories": STORIES}, context)
+
+    with pytest.raises(LessonError) as error:
+        asyncio.run(scenario())
 
     assert str(error.value) == message
+    assert asked == []
+
+
+def test_a_choice_that_is_not_a_number_is_a_bad_answer() -> None:
+    reply = '{"candidate": true, "story": true}'
+
+    state, _, asked, _ = choose(CATALOG, STORIES, [reply, reply])
+
+    assert tried(state) == [TopicToTry(topic, None) for topic in FALLBACK]
+    assert asked == [MODEL, MODEL]
