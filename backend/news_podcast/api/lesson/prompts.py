@@ -32,7 +32,8 @@ def material_template(prompt: str) -> ChatPromptTemplate:
 
 
 def one_line(text: str) -> str:
-    """The text on one line, for a numbered material the model answers by number."""
+    """The text on one line, so it keeps the material's layout: the pick answers by
+    the numbers at the start of each line."""
     return " ".join(text.split())
 
 

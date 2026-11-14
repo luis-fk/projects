@@ -32,6 +32,7 @@ from tests.news_podcast.lesson.context import (
     offline_client,
     script_answer,
     search_result,
+    words_in,
 )
 
 README = Path(graph.__file__).resolve().parents[2] / "README.md"
@@ -54,7 +55,7 @@ def pick(pages: list[int], terms: str = "") -> str:
 
 
 # The script and its review, after the pages.
-WRITTEN = [script_answer(), script_answer(changes=[])]
+WRITTEN = [script_answer(), script_answer(*words_in(990), changes=["Cortei."])]
 TAIL = ["keep_pages", "write_script", "review_script"]
 
 
@@ -112,7 +113,8 @@ def test_one_good_search_settles_the_topic_and_its_pages_then_the_script() -> No
 
     assert outcome.error is None
     assert outcome.path == ["choose_topic", "search", "pick_pages", *TAIL]
-    assert (len(outcome.state["turns"]), outcome.state["words"]) == (10, 1000)
+    # The review's words, not the script's.
+    assert (len(outcome.state["turns"]), outcome.state["words"]) == (10, 990)
     assert outcome.state["topic"] == TopicToTry(VETO, STORIES[1])
     assert [page.title for page in outcome.state["pages"]] == [
         "Entenda o veto",

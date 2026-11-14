@@ -37,5 +37,6 @@ LESSON_WORDS_PER_MINUTE = 150
 # Above 1.1 times the maximum, a script is asked again: at 9 minutes that is 1,485
 # words, about 9.9 minutes, so the lesson stays under 10. A short script is fine.
 LONG_SCRIPT_RATIO = 1.1
-# The review may cut but never add: more than 5% longer is asked again.
+# The review may cut and correct: more than 5% longer than the script, or past the
+# lesson's ceiling, is asked again.
 MAX_REVIEW_GROWTH = 1.05

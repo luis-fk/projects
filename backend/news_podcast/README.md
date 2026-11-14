@@ -217,9 +217,9 @@ by name, builds on the area's earlier lessons and closes with a short recap
   than 1.1 times the maximum is asked again, so a lesson stays under 10 minutes; a
   short one is fine, and there is no request to lengthen it.
 - **Review:** a second request checks the script against its pages. It removes or
-  corrects what they don't support and any changing figure without a date, and may
-  cut but never add: a reviewed script more than 5% longer is asked again. Each change
-  goes to the log. When no model gives a valid review, there is no lesson that day.
+  corrects what they don't support and any changing figure without a date. It may cut
+  and correct, but adds no turn: a reviewed script with more turns, more than 5%
+  longer, or over the lesson's ceiling is asked again. Each change goes to the log. When no model gives a valid review, there is no lesson that day.
 
 ## Lesson graph
 

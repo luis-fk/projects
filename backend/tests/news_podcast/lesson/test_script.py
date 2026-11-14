@@ -5,11 +5,11 @@ from datetime import date
 from typing import Any
 
 import pytest
-from news_podcast.api.lesson.script import review_script, word_range, write_script
 
 from news_podcast.api.core.llm import TextError
 from news_podcast.api.lesson.prompts import REVIEW_FIELDS, SCRIPT_FIELDS
 from news_podcast.api.lesson.schemas import LessonOptions, LessonPage, TopicToTry
+from news_podcast.api.lesson.script import review_script, word_range, write_script
 from news_podcast.api.lesson.state import LessonContext, LessonState, topic_start
 from tests.news_podcast.factories import build_lesson_options, catalog_topic
 from tests.news_podcast.fake_models import FakeChatModel
@@ -31,17 +31,19 @@ AREA: dict[str, Any] = {
 VETO = catalog_topic(
     id=31, position=11, title="Como o Congresso derruba um veto", **AREA
 )
+# Listed out of teaching order, so only the sort can put the titles in it.
 CATALOG = [
-    catalog_topic(
-        id=30, position=1, title="Câmara e Senado", taught_on=date(2026, 11, 1), **AREA
-    ),
-    VETO,
     catalog_topic(
         id=32,
         position=2,
         title="Como um projeto vira lei",
         taught_on=date(2026, 11, 5),
         **AREA,
+    ),
+    catalog_topic(id=35, position=14, title="Decreto legislativo", **AREA),
+    VETO,
+    catalog_topic(
+        id=30, position=1, title="Câmara e Senado", taught_on=date(2026, 11, 1), **AREA
     ),
     catalog_topic(
         id=33, position=12, title="Lei ordinária, lei complementar e decreto", **AREA
@@ -145,12 +147,24 @@ def test_the_script_gets_the_prompt_the_pages_the_story_and_the_area() -> None:
         "\n"
         "Aulas já dadas nesta área, na ordem: Câmara e Senado; Como um projeto vira "
         "lei\n"
-        "Próximos temas da área: Lei ordinária, lei complementar e decreto\n"
+        "Próximos temas da área: Lei ordinária, lei complementar e decreto; "
+        "Decreto legislativo\n"
         "\n" + PAGES_TEXT
     )
     assert (len(state["turns"]), state["words"]) == (10, 1000)
     assert [usage.step for usage in context.progress.usages] == ["script"]
     assert asked == [MODEL]
+
+
+def test_an_area_with_no_other_topic_says_so() -> None:
+    alone = catalog_topic(id=90, area_id=9, area="Sozinha", area_position=9)
+    single: LessonState = {**STATE, "topic": TopicToTry(alone, None)}
+
+    _, _, _, built = run_node(write_script, single, [script_answer()])
+
+    assert messages(built)[1].startswith(
+        "Aulas já dadas nesta área, na ordem: nenhuma\nPróximos temas da área: nenhum"
+    )
 
 
 def test_a_topic_with_no_hook_has_no_story_part() -> None:
@@ -200,7 +214,10 @@ def written(words: int = 1000) -> LessonState:
 def test_the_review_gets_the_pages_the_story_and_the_script(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    reviewed = script_answer(*words_in(990), changes=["Tirei uma taxa sem data."])
+    reviewed = script_answer(
+        *words_in(990),
+        changes=["Tirei uma taxa sem data.", "Corrigi o prazo do veto."],
+    )
 
     with caplog.at_level(logging.INFO):
         state, context, asked, built = run_node(review_script, written(), [reviewed])
@@ -213,11 +230,14 @@ def test_the_review_gets_the_pages_the_story_and_the_script(
     assert human.startswith(
         PAGES_TEXT
         + "\n\nNotícia que abriu a aula: Congresso derruba veto do presidente "
-        "(como o veto caiu)\n\nRoteiro:\nBia: palavra"
+        "(como o veto caiu)\n\nAulas já dadas nesta área, na ordem: Câmara e Senado; "
+        "Como um projeto vira lei\nPróximos temas da área: Lei ordinária, lei "
+        "complementar e decreto; Decreto legislativo\n\nRoteiro:\nBia: palavra"
     )
     assert human.count("\nBia: ") + human.count("\nLéo: ") == 10
     assert state["words"] == 990
     assert "Tirei uma taxa sem data." in caplog.text
+    assert "Corrigi o prazo do veto." in caplog.text
     assert [usage.step for usage in context.progress.usages] == ["review"]
     assert asked == [MODEL]
 
@@ -232,6 +252,42 @@ def test_a_review_more_than_5_percent_longer_is_asked_again() -> None:
 
     assert state["words"] == 1050
     assert asked == [MODEL, MODEL]
+
+
+def test_a_review_never_takes_the_lesson_past_its_ceiling() -> None:
+    # 1,500 words is under 5% more than 1,485, but over 1.1 times the 1,350 maximum.
+    answers = [
+        script_answer(*words_in(1500), changes=[]),
+        script_answer(*words_in(1480), changes=[]),
+    ]
+
+    state, _, asked, _ = run_node(review_script, written(1485), answers)
+
+    assert state["words"] == 1480
+    assert asked == [MODEL, MODEL]
+
+
+def test_a_review_that_adds_turns_is_asked_again() -> None:
+    answers = [
+        script_answer(*words_in(1000, turns=11), changes=[]),
+        script_answer(*words_in(1000), changes=[]),
+    ]
+
+    state, _, asked, _ = run_node(review_script, written(1000), answers)
+
+    assert len(state["turns"]) == 10
+    assert asked == [MODEL, MODEL]
+
+
+def test_a_review_that_changes_the_script_silently_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        run_node(
+            review_script, written(1000), [script_answer(*words_in(990), changes=[])]
+        )
+
+    assert "without listing a change" in caplog.text
 
 
 def test_a_review_with_too_few_turns_is_a_bad_answer() -> None:

@@ -65,19 +65,23 @@ async def write_script(state: LessonState, context: LessonContext) -> LessonStat
 async def review_script(state: LessonState, context: LessonContext) -> LessonState:
     """No review, no lesson: a failure here fails the lesson."""
     topic = state["topic"]
+    script = state["turns"]
+    _, max_words = word_range(context.options)
     turns, changes = await context.text.ask(
         material_template(context.options.review_prompt),
         {
-            "material": review_material(topic, state["pages"], state["turns"]),
+            "material": review_material(topic, state["pages"], script, context.catalog),
             "today": lesson_date(context.today),
             "topic": topic.topic.title,
         },
         step="review",
         schema=ReviewedScript,
-        check=checked_review(state["words"]),
+        check=checked_review(state["words"], len(script), max_words),
     )
     for change in changes:
         logger.info(f"Lesson review: {change}")
+    if not changes and turns != script:
+        logger.warning("The lesson review changed the script without listing a change")
     return {"turns": turns, "words": count_words(turns)}
 
 
@@ -98,19 +102,27 @@ def checked_script(max_words: int) -> Callable[[LessonScript], list[Turn]]:
 
 
 def checked_review(
-    words: int,
+    words: int, turns: int, max_words: int
 ) -> Callable[[ReviewedScript], tuple[list[Turn], list[str]]]:
-    """The review may cut but never add: more than MAX_REVIEW_GROWTH times the script
-    is asked again."""
-    ceiling = round(MAX_REVIEW_GROWTH * words)
+    """The review may cut and correct, but it adds no turn, grows at most
+    MAX_REVIEW_GROWTH, and never passes the lesson's own ceiling, so the lesson stays
+    under 10 minutes."""
+    ceiling = min(
+        round(MAX_REVIEW_GROWTH * words), round(LONG_SCRIPT_RATIO * max_words)
+    )
 
     def check(review: ReviewedScript) -> tuple[list[Turn], list[str]]:
-        turns = checked_turns(core_turns(review.turns), HOSTS)
-        if (reviewed := count_words(turns)) > ceiling:
+        reviewed = checked_turns(core_turns(review.turns), HOSTS)
+        if len(reviewed) > turns:
             raise BadAnswerError(
-                f"a revisão veio com {reviewed} palavras, acima de {ceiling}"
+                f"a revisão veio com {len(reviewed)} falas, mais que as {turns} "
+                "do roteiro"
             )
-        return turns, review.changes
+        if (reviewed_words := count_words(reviewed)) > ceiling:
+            raise BadAnswerError(
+                f"a revisão veio com {reviewed_words} palavras, acima de {ceiling}"
+            )
+        return reviewed, review.changes
 
     return check
 
@@ -125,21 +137,23 @@ def script_material(
     parts = []
     if topic.hook is not None:
         parts.append(story_line("Notícia de hoje que abre a aula", topic.hook))
-    taught, upcoming = area_course(topic.topic, catalog)
-    parts.append(
-        f"Aulas já dadas nesta área, na ordem: {'; '.join(taught) or 'nenhuma'}\n"
-        f"Próximos temas da área: {'; '.join(upcoming) or 'nenhum'}"
-    )
+    parts.append(course_lines(topic.topic, catalog))
     parts.append(pages_material(pages))
     return "\n\n".join(parts)
 
 
 def review_material(
-    topic: TopicToTry, pages: Sequence[LessonPage], turns: Sequence[Turn]
+    topic: TopicToTry,
+    pages: Sequence[LessonPage],
+    turns: Sequence[Turn],
+    catalog: Sequence[CatalogTopic],
 ) -> str:
+    """The course's titles too, so the review can tell a real lesson from one the
+    script made up."""
     parts = [pages_material(pages)]
     if topic.hook is not None:
         parts.append(story_line("Notícia que abriu a aula", topic.hook))
+    parts.append(course_lines(topic.topic, catalog))
     lines = [f"{turn.speaker}: {turn.text}" for turn in turns]
     parts.append("Roteiro:\n" + "\n".join(lines))
     return "\n\n".join(parts)
@@ -158,6 +172,14 @@ def pages_material(pages: Sequence[LessonPage]) -> str:
 
 def story_line(label: str, story: NewsStory) -> str:
     return f"{label}: {one_line(story.title)} ({one_line(story.angle)})"
+
+
+def course_lines(topic: CatalogTopic, catalog: Sequence[CatalogTopic]) -> str:
+    taught, upcoming = area_course(topic, catalog)
+    return (
+        f"Aulas já dadas nesta área, na ordem: {'; '.join(taught) or 'nenhuma'}\n"
+        f"Próximos temas da área: {'; '.join(upcoming) or 'nenhum'}"
+    )
 
 
 def area_course(
