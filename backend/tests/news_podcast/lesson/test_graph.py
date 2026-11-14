@@ -30,6 +30,7 @@ from tests.news_podcast.lesson.context import (
     found,
     lesson_context,
     offline_client,
+    script_answer,
     search_result,
 )
 
@@ -50,6 +51,11 @@ PAGES = [
 
 def pick(pages: list[int], terms: str = "") -> str:
     return json.dumps({"pages": pages, "terms": terms})
+
+
+# The script and its review, after the pages.
+WRITTEN = [script_answer(), script_answer(changes=[])]
+TAIL = ["keep_pages", "write_script", "review_script"]
 
 
 def run(
@@ -92,16 +98,21 @@ def test_the_readme_shows_the_graph_as_it_is() -> None:
         "pick_pages",
         "next_topic",
         "keep_pages",
+        "write_script",
+        "review_script",
         "__end__",
     }
     assert readme_diagram() == drawing.draw_mermaid()
 
 
-def test_one_good_search_settles_the_topic_and_its_pages() -> None:
-    outcome = run(CATALOG, [answer(3, 2), pick([1, 2, 3])], FakeSearch(found(*PAGES)))
+def test_one_good_search_settles_the_topic_and_its_pages_then_the_script() -> None:
+    answers = [answer(3, 2), pick([1, 2, 3]), *WRITTEN]
+
+    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)))
 
     assert outcome.error is None
-    assert outcome.path == ["choose_topic", "search", "pick_pages", "keep_pages"]
+    assert outcome.path == ["choose_topic", "search", "pick_pages", *TAIL]
+    assert (len(outcome.state["turns"]), outcome.state["words"]) == (10, 1000)
     assert outcome.state["topic"] == TopicToTry(VETO, STORIES[1])
     assert [page.title for page in outcome.state["pages"]] == [
         "Entenda o veto",
@@ -113,7 +124,7 @@ def test_one_good_search_settles_the_topic_and_its_pages() -> None:
 
 def test_other_terms_bring_one_more_search_whose_pick_sees_every_result() -> None:
     fake = FakeSearch(found(PAGES[0]), found(PAGES[1], PAGES[2], PAGES[0]))
-    answers = [answer(3, 2), pick([1], "derrubada de veto"), pick([1, 2, 3])]
+    answers = [answer(3, 2), pick([1], "derrubada de veto"), pick([1, 2, 3]), *WRITTEN]
     built: dict[str, FakeChatModel] = {}
 
     outcome = run(CATALOG, answers, fake, built=built)
@@ -124,7 +135,7 @@ def test_other_terms_bring_one_more_search_whose_pick_sees_every_result() -> Non
         "pick_pages",
         "search",
         "pick_pages",
-        "keep_pages",
+        *TAIL,
     ]
     assert fake.calls[1][0] == "derrubada de veto"
     assert [result.url for result in outcome.state["results"]] == [
@@ -137,19 +148,19 @@ def test_other_terms_bring_one_more_search_whose_pick_sees_every_result() -> Non
 
 def test_terms_on_the_second_pick_start_no_third_search() -> None:
     fake = FakeSearch(found(PAGES[0]), found(*PAGES))
-    answers = [answer(3, 2), pick([1], "uma"), pick([1, 2], "outra")]
+    answers = [answer(3, 2), pick([1], "uma"), pick([1, 2], "outra"), *WRITTEN]
 
     outcome = run(CATALOG, answers, fake)
 
     assert outcome.error is None
     assert len(fake.calls) == 2
-    assert outcome.path[-1] == "keep_pages"
+    assert outcome.path[-3:] == TAIL
 
 
 def test_a_topic_short_of_pages_gives_way_to_the_next_with_one_warning() -> None:
     warnings: list[str] = []
     fake = FakeSearch(found(PAGES[0]), found(*PAGES))
-    answers = [answer(3, 2), pick([1]), pick([1, 2, 3])]
+    answers = [answer(3, 2), pick([1]), pick([1, 2, 3]), *WRITTEN]
 
     outcome = run(CATALOG, answers, fake, warnings)
 
@@ -160,7 +171,7 @@ def test_a_topic_short_of_pages_gives_way_to_the_next_with_one_warning() -> None
         "next_topic",
         "search",
         "pick_pages",
-        "keep_pages",
+        *TAIL,
     ]
     assert outcome.state["topic"] == TopicToTry(POWERS, None)
     assert fake.calls[1][0] == POWERS.title
@@ -177,7 +188,7 @@ def test_a_refused_warning_never_stops_the_lesson(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     fake = FakeSearch(found(PAGES[0]), found(*PAGES))
-    answers = [answer(3, 2), pick([1]), pick([1, 2, 3])]
+    answers = [answer(3, 2), pick([1]), pick([1, 2, 3]), *WRITTEN]
 
     outcome = run(
         CATALOG,
@@ -187,7 +198,7 @@ def test_a_refused_warning_never_stops_the_lesson(
     )
 
     assert outcome.error is None
-    assert outcome.path[-1] == "keep_pages"
+    assert outcome.path[-3:] == TAIL
     assert "bot bloqueado" in caplog.text
 
 
@@ -243,9 +254,41 @@ def test_a_pick_no_model_answers_fails_the_lesson() -> None:
 
 
 def test_a_choice_that_counts_as_none_still_counts_in_the_usages() -> None:
-    outcome = run(CATALOG, [answer(0, 0), pick([1, 2])], FakeSearch(found(*PAGES)))
+    answers = [answer(0, 0), pick([1, 2]), *WRITTEN]
 
-    assert [usage.step for usage in outcome.usages] == ["choice", "pick"]
+    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)))
+
+    assert [usage.step for usage in outcome.usages] == [
+        "choice",
+        "pick",
+        "script",
+        "review",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("written", "step", "usages"),
+    [
+        (["não é json", "nem isto"], "roteiro", ["script", "script"]),
+        (
+            [script_answer(), "não é json", "nem isto"],
+            "revisão",
+            ["script", "review", "review"],
+        ),
+    ],
+)
+def test_a_failed_script_or_review_keeps_the_topic_pages_and_paid_usages(
+    written: list[str], step: str, usages: list[str]
+) -> None:
+    answers = [answer(3, 2), pick([1, 2, 3]), *written]
+
+    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)))
+
+    assert isinstance(outcome.error, TextError)
+    assert outcome.step == step
+    assert outcome.state["topic"] == TopicToTry(VETO, STORIES[1])
+    assert len(outcome.state["pages"]) == 3
+    assert [usage.step for usage in outcome.usages] == ["choice", "pick", *usages]
 
 
 def test_a_run_with_no_candidate_fails_at_the_topic_step_without_raising() -> None:

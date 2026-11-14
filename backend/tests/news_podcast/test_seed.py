@@ -135,6 +135,14 @@ def test_each_seed_lesson_prompt_fills_only_its_placeholders_and_never_asks_for_
     assert "json" not in prompt.lower()
 
 
+def test_the_seed_script_prompt_opens_by_whether_the_summary_went_out() -> None:
+    prompt = read(SEED_DIR, "lesson_settings.json")["script_prompt"]
+
+    assert "{news_sent}" in prompt
+    assert "no resumo de hoje" in prompt
+    assert "nas notícias de hoje" in prompt
+
+
 def test_the_seed_settings_pass_the_admin_checks() -> None:
     PodcastSettings(**read(SEED_DIR, "settings.json")).full_clean()
 

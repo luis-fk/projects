@@ -205,6 +205,22 @@ text. Nothing is downloaded, since the text comes from Tavily.
 - **Key:** the search needs `TAVILY_API_KEY`. Without it, or when Tavily fails, the
   lesson fails at "busca das fontes".
 
+## Lesson script
+
+One text request writes the lesson as a dialogue from its pages only: Bia explains
+and Léo asks, it opens from the motivating story when there is one, cites its sources
+by name, builds on the area's earlier lessons and closes with a short recap
+(`api/lesson/script.py`).
+
+- **Length:** the lesson's minimum and maximum minutes (6 to 9 in the seed) at 150
+  words a minute (`LESSON_WORDS_PER_MINUTE`), times the speech speed. A script more
+  than 1.1 times the maximum is asked again, so a lesson stays under 10 minutes; a
+  short one is fine, and there is no request to lengthen it.
+- **Review:** a second request checks the script against its pages. It removes or
+  corrects what they don't support and any changing figure without a date, and may
+  cut but never add: a reviewed script more than 5% longer is asked again. Each change
+  goes to the log. When no model gives a valid review, there is no lesson that day.
+
 ## Lesson graph
 
 The lesson runs as a LangGraph graph (`api/lesson/graph.py`, the only module that
@@ -224,15 +240,19 @@ graph TD;
 	pick_pages(pick_pages)
 	next_topic(next_topic)
 	keep_pages(keep_pages)
+	write_script(write_script)
+	review_script(review_script)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> choose_topic;
 	choose_topic --> search;
+	keep_pages --> write_script;
 	next_topic --> search;
 	pick_pages -. &nbsp;enough_pages&nbsp; .-> keep_pages;
 	pick_pages -. &nbsp;too_few_pages&nbsp; .-> next_topic;
 	pick_pages -. &nbsp;other_terms&nbsp; .-> search;
 	search --> pick_pages;
-	keep_pages --> __end__;
+	write_script --> review_script;
+	review_script --> __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc

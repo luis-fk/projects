@@ -8,7 +8,7 @@ from datetime import date
 from typing import Any, Protocol, TypedDict
 
 from news_podcast.api.core.llm import TextModels
-from news_podcast.api.core.schemas import NewsStory, Usage
+from news_podcast.api.core.schemas import NewsStory, Turn, Usage
 from news_podcast.api.lesson.schemas import (
     CatalogTopic,
     LessonOptions,
@@ -41,6 +41,8 @@ class LessonState(TypedDict, total=False):
     terms: str
     topic: TopicToTry
     pages: list[LessonPage]
+    turns: list[Turn]
+    words: int
 
 
 class SearchClient(Protocol):

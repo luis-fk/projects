@@ -82,6 +82,31 @@ class PagePick(BaseModel):
     )
 
 
+class LessonTurn(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+    speaker: str = Field(description="Quem fala: um dos dois apresentadores.")
+    text: str = Field(description="O que a pessoa diz, escrito para ser ouvido.")
+
+
+class LessonScript(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+    turns: list[LessonTurn] = Field(description="As falas da aula, na ordem.")
+
+
+class ReviewedScript(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+    turns: list[LessonTurn] = Field(
+        description="O roteiro revisado, fala por fala, na ordem."
+    )
+    changes: list[str] = Field(
+        description="Cada mudança feita e por quê, uma frase por mudança; vazio "
+        "quando nada mudou."
+    )
+
+
 @dataclass(frozen=True)
 class LessonOptions:
     """The lesson settings the nodes read, with the speech speed from Settings."""

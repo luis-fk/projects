@@ -31,6 +31,11 @@ def material_template(prompt: str) -> ChatPromptTemplate:
     )
 
 
+def one_line(text: str) -> str:
+    """The text on one line, for a numbered material the model answers by number."""
+    return " ".join(text.split())
+
+
 def lesson_date(day: date) -> str:
     """Today with its year, since the prompts weigh how recent a page is."""
     return f"{long_date(day)} de {day.year}"
