@@ -19,6 +19,7 @@ from news_podcast.api.episode.feeds import GOOGLE_NEWS_HOST
 from news_podcast.api.episode.schemas import EpisodeOptions, FeedSource
 from news_podcast.api.lesson import prompts as lesson_prompts
 from news_podcast.api.lesson.config import LESSON_MINUTES_LIMIT
+from news_podcast.api.lesson.schemas import CatalogTopic
 
 SLOWEST, FASTEST = SPEECH_SPEED_LIMITS
 BRACES_HELP = "Write a literal brace as {{ or }}."
@@ -386,6 +387,30 @@ class Topic(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+    @classmethod
+    def catalog(cls) -> list[CatalogTopic]:
+        """The catalog as the lesson reads it, in teaching order. A topic's taught_on
+        is the São Paulo date of its latest sent lesson."""
+        catalog: list[CatalogTopic] = []
+        for topic in cls.objects.with_taught_at().select_related("area"):
+            # The annotation from with_taught_at(), which the stubs can't see.
+            taught_at = getattr(topic, "taught_at")
+            catalog.append(
+                CatalogTopic(
+                    id=topic.pk,
+                    area_id=topic.area_id,
+                    area=topic.area.name,
+                    area_position=topic.area.position,
+                    position=topic.position,
+                    title=topic.title,
+                    active=topic.active,
+                    taught_on=None
+                    if taught_at is None
+                    else taught_at.astimezone(LOCAL_TZ).date(),
+                )
+            )
+        return catalog
 
 
 class Episode(models.Model):

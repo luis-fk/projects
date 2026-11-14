@@ -175,6 +175,32 @@ admin.
   makes its topic available again.
 - **Deleting:** a topic with lessons in the history can't be deleted, nor can its
   area; untick it instead.
+- **Picking:** each area offers its next topic. A topic tied to one of the day's
+  stories goes first, with the story as the opening; otherwise the area taught
+  least recently goes, and an area never taught goes before any other.
+
+## Lesson graph
+
+The lesson runs as a LangGraph graph (`api/lesson/graph.py`, the only module that
+imports langgraph). Each node is an async function of the lesson's state and the
+run's context, and a failure keeps the step it happened at and the cost paid so far.
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	choose_topic(choose_topic)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> choose_topic;
+	choose_topic --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
 
 ## History
 

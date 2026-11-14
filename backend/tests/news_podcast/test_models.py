@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
@@ -10,6 +10,8 @@ from django.db.models import ProtectedError
 
 from news_podcast.api.core.schemas import ModelPrice
 from news_podcast.api.episode.schemas import EpisodeOptions
+from news_podcast.api.lesson.schemas import CatalogTopic
+from news_podcast.api.lesson.topics import candidates
 from news_podcast.models import (
     LESSON_PROMPT_FIELDS,
     Area,
@@ -497,3 +499,46 @@ def test_without_a_lesson_row_load_says_to_run_the_seed_and_creates_none() -> No
         LessonSettings.load()
 
     assert not LessonSettings.objects.exists()
+
+
+@DATABASES
+def test_the_catalog_snapshot_has_each_topic_with_its_sao_paulo_taught_date() -> None:
+    justice = create_area(name="Justiça", position=2)
+    congress = create_area(name="O Congresso e as leis", position=1)
+    # Created out of teaching order, so only the query's order can sort them.
+    create_topic(justice, title="O STF: o que julga", position=2, active=False)
+    veto = create_topic(congress, title="Como o Congresso derruba um veto", position=11)
+    sent = create_lesson_row(veto, started_at=datetime(2026, 11, 13, 1, 30, tzinfo=UTC))
+    create_lesson_row(veto, status=Episode.Status.FAILED)
+
+    catalog = Topic.catalog()
+
+    assert catalog == [
+        CatalogTopic(
+            id=veto.pk,
+            area_id=congress.pk,
+            area="O Congresso e as leis",
+            area_position=1,
+            position=11,
+            title="Como o Congresso derruba um veto",
+            active=True,
+            taught_on=date(2026, 11, 12),
+        ),
+        CatalogTopic(
+            id=Topic.objects.get(title="O STF: o que julga").pk,
+            area_id=justice.pk,
+            area="Justiça",
+            area_position=2,
+            position=2,
+            title="O STF: o que julga",
+            active=False,
+            taught_on=None,
+        ),
+    ]
+    assert candidates(catalog) == []
+
+    sent.delete()
+
+    assert [topic.title for topic in candidates(Topic.catalog())] == [
+        "Como o Congresso derruba um veto"
+    ]

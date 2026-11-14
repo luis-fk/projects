@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
+from news_podcast.api.lesson.schemas import CatalogTopic, LessonOptions
 from news_podcast.models import Area, Episode, LessonSettings, PodcastSettings, Topic
 
 # A complete settings row with short values that pass clean(). The model names are
@@ -66,6 +67,28 @@ def build_lesson_settings(**changes: Any) -> LessonSettings:
 
 def create_lesson_settings(**changes: Any) -> LessonSettings:
     return LessonSettings.objects.create(**{**LESSON_SETTINGS, **changes})
+
+
+def build_lesson_options(**changes: Any) -> LessonOptions:
+    """The snapshot the lesson's nodes read, from the factory's lesson settings."""
+    values = {
+        name: value for name, value in LESSON_SETTINGS.items() if "price" not in name
+    }
+    return LessonOptions(**{**values, "speech_speed": 1.0, **changes})
+
+
+def catalog_topic(**changes: Any) -> CatalogTopic:
+    values = {
+        "id": 1,
+        "area_id": 1,
+        "area": "Justiça",
+        "area_position": 1,
+        "position": 1,
+        "title": "O STF: o que julga",
+        "active": True,
+        "taught_on": None,
+    }
+    return CatalogTopic(**{**values, **changes})
 
 
 def create_area(**changes: Any) -> Area:
