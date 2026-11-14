@@ -8,6 +8,7 @@ from typing import NamedTuple
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from news_podcast.api.core.schemas import NewsStory
+from news_podcast.api.lesson.config import MIN_LESSON_PAGES
 
 
 class CatalogTopic(NamedTuple):
@@ -41,6 +42,43 @@ class TopicChoice(BaseModel):
     )
     story: StrictInt = Field(
         description="O número da notícia a que o tema escolhido se liga, ou 0."
+    )
+
+
+class SearchResult(NamedTuple):
+    """A search result that counts: a trusted host and enough text."""
+
+    url: str
+    title: str
+    site: str
+    published: str | None
+    excerpt: str
+    text: str
+
+
+class LessonPage(NamedTuple):
+    """A page the lesson rests on: the excerpt the pick judged it by, and its text
+    from the start, cut to MAX_PAGE_CHARS, so the excerpt may lie past the cut."""
+
+    title: str
+    site: str
+    url: str
+    published: str | None
+    excerpt: str
+    text: str
+
+
+class PagePick(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+    pages: list[StrictInt] = Field(
+        description="Os números das páginas escolhidas, da melhor para a pior; "
+        "vazio quando nenhuma serve."
+    )
+    terms: str = Field(
+        max_length=300,
+        description=f"Outros termos de busca quando faltam {MIN_LESSON_PAGES} páginas "
+        "boas e atuais; vazio quando as páginas escolhidas bastam.",
     )
 
 

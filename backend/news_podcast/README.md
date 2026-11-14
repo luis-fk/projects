@@ -179,6 +179,32 @@ admin.
   stories goes first, with the story as the opening; otherwise the area taught
   least recently goes, and an area never taught goes before any other.
 
+## Lesson sources
+
+Each lesson searches for its pages with Tavily when it is made (`api/lesson/sources.py`),
+only on the trusted sites of `LESSON_SOURCE_DOMAINS` (`api/lesson/config.py`), each
+with its subdomains:
+
+- `leg.br`: the Câmara, the Senado and the Congresso, and the state and city
+  legislatures too;
+- `jus.br`: the courts, the TSE included;
+- `gov.br`: the federal government, with the Banco Central, the IBGE and the Tesouro,
+  and the state and city governments too;
+- Politize! and Agência Brasil.
+
+The pick leaves out pages about something else. Wikipedia isn't on the list, by the
+owner's choice. Neither is ICL Notícias: a search covers its whole site, opinion
+pieces included. The code checks each result's host again and keeps only pages with
+text. Nothing is downloaded, since the text comes from Tavily.
+
+- **The pick:** a text model picks up to 3 pages, best first, and may ask for one more
+  search with other words.
+- **At least 2 pages:** with fewer, the next topic is tried, with a warning to the
+  admin chat naming the skipped one. A lesson searches at most 2 topics, twice each, so
+  it spends 8 Tavily credits at most; the history doesn't count them.
+- **Key:** the search needs `TAVILY_API_KEY`. Without it, or when Tavily fails, the
+  lesson fails at "busca das fontes".
+
 ## Lesson graph
 
 The lesson runs as a LangGraph graph (`api/lesson/graph.py`, the only module that
@@ -194,9 +220,19 @@ config:
 graph TD;
 	__start__([<p>__start__</p>]):::first
 	choose_topic(choose_topic)
+	search(search)
+	pick_pages(pick_pages)
+	next_topic(next_topic)
+	keep_pages(keep_pages)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> choose_topic;
-	choose_topic --> __end__;
+	choose_topic --> search;
+	next_topic --> search;
+	pick_pages -. &nbsp;enough_pages&nbsp; .-> keep_pages;
+	pick_pages -. &nbsp;too_few_pages&nbsp; .-> next_topic;
+	pick_pages -. &nbsp;other_terms&nbsp; .-> search;
+	search --> pick_pages;
+	keep_pages --> __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc

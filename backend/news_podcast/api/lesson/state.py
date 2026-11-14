@@ -2,13 +2,23 @@
 progress, which stays out of the state because LangGraph drops the writes of a node
 that raises."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
-from typing import TypedDict
+from typing import Any, Protocol, TypedDict
 
 from news_podcast.api.core.llm import TextModels
 from news_podcast.api.core.schemas import NewsStory, Usage
-from news_podcast.api.lesson.schemas import CatalogTopic, LessonOptions, TopicToTry
+from news_podcast.api.lesson.schemas import (
+    CatalogTopic,
+    LessonOptions,
+    LessonPage,
+    SearchResult,
+    TopicToTry,
+)
+
+# Sends a warning to the admin chat, or to the log with --no-send; it never fails.
+Warn = Callable[[str], Awaitable[None]]
 
 
 class LessonError(Exception):
@@ -25,6 +35,30 @@ class LessonState(TypedDict, total=False):
     topics: list[TopicToTry]
     topic_index: int
     skipped: list[str]
+    results: list[SearchResult]
+    searches: int
+    picked: list[SearchResult]
+    terms: str
+    topic: TopicToTry
+    pages: list[LessonPage]
+
+
+class SearchClient(Protocol):
+    """tavily-python's AsyncTavilyClient, or a fake with the same search."""
+
+    async def search(self, query: str, **options: Any) -> dict[str, Any]: ...
+
+
+def topic_start(index: int) -> LessonState:
+    """The keys a topic starts with: its index, and no results, searches, picks or
+    terms yet."""
+    return {
+        "topic_index": index,
+        "results": [],
+        "searches": 0,
+        "picked": [],
+        "terms": "",
+    }
 
 
 @dataclass
@@ -47,3 +81,5 @@ class LessonContext:
     today: date
     text: TextModels
     progress: LessonProgress
+    search: SearchClient | None
+    warn: Warn

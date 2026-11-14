@@ -6,3 +6,4 @@ from pytest_django import Settings
 def keys(settings: Settings) -> None:
     """TextModels needs the key in the settings; the fake models never use it."""
     settings.GEMINI_API_KEY = "gemini-test-key"
+    settings.TAVILY_API_KEY = None

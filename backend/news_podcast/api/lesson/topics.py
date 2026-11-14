@@ -6,7 +6,12 @@ from news_podcast.api.core.llm import TextError
 from news_podcast.api.core.schemas import NewsStory
 from news_podcast.api.lesson.prompts import lesson_date, material_template
 from news_podcast.api.lesson.schemas import CatalogTopic, TopicChoice, TopicToTry
-from news_podcast.api.lesson.state import LessonContext, LessonError, LessonState
+from news_podcast.api.lesson.state import (
+    LessonContext,
+    LessonError,
+    LessonState,
+    topic_start,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +72,7 @@ async def choose_topic(state: LessonState, context: LessonContext) -> LessonStat
         logger.info(f"Lesson topic: {topic.title}, tied to the story {story.title}")
     else:
         logger.info(f"Lesson topic, in the course's order: {topics[0].topic.title}")
-    return {"topics": topics, "topic_index": 0, "skipped": []}
+    return {**topic_start(0), "topics": topics, "skipped": []}
 
 
 async def choice(

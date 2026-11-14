@@ -1,24 +1,36 @@
 import asyncio
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from tavily.errors import UsageLimitExceededError
 
 from news_podcast.api.core.config import TEXT_RETRY_MINUTES, VOICE_RETRY_MINUTES
-from news_podcast.api.core.llm import TextModels
+from news_podcast.api.core.llm import TextError, TextModels
+from news_podcast.api.core.telegram import TelegramClient, TelegramError
 from news_podcast.api.lesson import graph
 from news_podcast.api.lesson.config import MAX_LESSON_MINUTES, MAX_LESSON_STEPS
 from news_podcast.api.lesson.graph import LESSON_GRAPH, LessonOutcome, run_graph
+from news_podcast.api.lesson.messages import admin_warner
 from news_podcast.api.lesson.schemas import CatalogTopic, TopicToTry
-from news_podcast.api.lesson.state import LessonError, LessonState
+from news_podcast.api.lesson.sources import SearchError
+from news_podcast.api.lesson.state import LessonError, LessonState, Warn
+from tests.news_podcast.fake_models import FakeChatModel
 from tests.news_podcast.lesson.context import (
     CATALOG,
+    MODEL,
+    POWERS,
     STORIES,
     VETO,
+    FakeSearch,
     answer,
+    found,
     lesson_context,
+    offline_client,
+    search_result,
 )
 
 README = Path(graph.__file__).resolve().parents[2] / "README.md"
@@ -29,10 +41,36 @@ INPUTS: LessonState = {"stories": STORIES, "news_sent": True, "send": False}
 TEST_SECONDS = 10
 
 
-def run(catalog: list[CatalogTopic], answers: list[Any]) -> LessonOutcome:
+PAGES = [
+    search_result(),
+    search_result(url="https://www.camara.leg.br/veto", title="Vetos"),
+    search_result(url="https://portal.stf.jus.br/veto", title="O STF e o veto"),
+]
+
+
+def pick(pages: list[int], terms: str = "") -> str:
+    return json.dumps({"pages": pages, "terms": terms})
+
+
+def run(
+    catalog: list[CatalogTopic],
+    answers: list[Any],
+    search: FakeSearch | None = None,
+    warnings: list[str] | None = None,
+    built: dict[str, FakeChatModel] | None = None,
+    warn: Callable[[httpx.AsyncClient], Warn] | None = None,
+) -> LessonOutcome:
     async def scenario() -> LessonOutcome:
-        async with httpx.AsyncClient() as client:
-            context = lesson_context(client, catalog, answers=answers)
+        async with offline_client() as client:
+            context = lesson_context(
+                client,
+                catalog,
+                answers=answers,
+                search=search,
+                warnings=warnings,
+                built=built,
+                warn=warn(client) if warn else None,
+            )
             return await run_graph(INPUTS, context)
 
     return asyncio.run(asyncio.wait_for(scenario(), TEST_SECONDS))
@@ -47,23 +85,167 @@ def readme_diagram() -> str:
 def test_the_readme_shows_the_graph_as_it_is() -> None:
     drawing = LESSON_GRAPH.get_graph()
 
-    assert set(drawing.nodes) == {"__start__", "choose_topic", "__end__"}
+    assert set(drawing.nodes) == {
+        "__start__",
+        "choose_topic",
+        "search",
+        "pick_pages",
+        "next_topic",
+        "keep_pages",
+        "__end__",
+    }
     assert readme_diagram() == drawing.draw_mermaid()
 
 
-def test_a_run_takes_the_topic_step_and_keeps_its_topics() -> None:
-    outcome = run(CATALOG, [answer(3, 2)])
+def test_one_good_search_settles_the_topic_and_its_pages() -> None:
+    outcome = run(CATALOG, [answer(3, 2), pick([1, 2, 3])], FakeSearch(found(*PAGES)))
 
     assert outcome.error is None
-    assert outcome.path == ["choose_topic"]
-    assert outcome.state["topics"][0] == TopicToTry(VETO, STORIES[1])
+    assert outcome.path == ["choose_topic", "search", "pick_pages", "keep_pages"]
+    assert outcome.state["topic"] == TopicToTry(VETO, STORIES[1])
+    assert [page.title for page in outcome.state["pages"]] == [
+        "Entenda o veto",
+        "Vetos",
+        "O STF e o veto",
+    ]
     assert outcome.state["stories"] == STORIES
 
 
-def test_a_choice_that_counts_as_none_still_counts_in_the_usages() -> None:
-    outcome = run(CATALOG, [answer(0, 0)])
+def test_other_terms_bring_one_more_search_whose_pick_sees_every_result() -> None:
+    fake = FakeSearch(found(PAGES[0]), found(PAGES[1], PAGES[2], PAGES[0]))
+    answers = [answer(3, 2), pick([1], "derrubada de veto"), pick([1, 2, 3])]
+    built: dict[str, FakeChatModel] = {}
 
-    assert [usage.step for usage in outcome.usages] == ["choice"]
+    outcome = run(CATALOG, answers, fake, built=built)
+
+    assert outcome.path == [
+        "choose_topic",
+        "search",
+        "pick_pages",
+        "search",
+        "pick_pages",
+        "keep_pages",
+    ]
+    assert fake.calls[1][0] == "derrubada de veto"
+    assert [result.url for result in outcome.state["results"]] == [
+        page["url"] for page in PAGES
+    ]
+    second_pick = str(built[MODEL].received[2][1].content)
+    assert [line[:3] for line in second_pick.splitlines()[1:]] == ["1. ", "2. ", "3. "]
+    assert "Entenda o veto" in second_pick
+
+
+def test_terms_on_the_second_pick_start_no_third_search() -> None:
+    fake = FakeSearch(found(PAGES[0]), found(*PAGES))
+    answers = [answer(3, 2), pick([1], "uma"), pick([1, 2], "outra")]
+
+    outcome = run(CATALOG, answers, fake)
+
+    assert outcome.error is None
+    assert len(fake.calls) == 2
+    assert outcome.path[-1] == "keep_pages"
+
+
+def test_a_topic_short_of_pages_gives_way_to_the_next_with_one_warning() -> None:
+    warnings: list[str] = []
+    fake = FakeSearch(found(PAGES[0]), found(*PAGES))
+    answers = [answer(3, 2), pick([1]), pick([1, 2, 3])]
+
+    outcome = run(CATALOG, answers, fake, warnings)
+
+    assert outcome.path == [
+        "choose_topic",
+        "search",
+        "pick_pages",
+        "next_topic",
+        "search",
+        "pick_pages",
+        "keep_pages",
+    ]
+    assert outcome.state["topic"] == TopicToTry(POWERS, None)
+    assert fake.calls[1][0] == POWERS.title
+    assert len(warnings) == 1
+    assert VETO.title in warnings[0]
+
+
+class RefusingTelegram(TelegramClient):
+    async def send_message(self, chat_id: str, text: str) -> None:
+        raise TelegramError("bot bloqueado")
+
+
+def test_a_refused_warning_never_stops_the_lesson(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeSearch(found(PAGES[0]), found(*PAGES))
+    answers = [answer(3, 2), pick([1]), pick([1, 2, 3])]
+
+    outcome = run(
+        CATALOG,
+        answers,
+        fake,
+        warn=lambda client: admin_warner(RefusingTelegram(client, "token"), "123"),
+    )
+
+    assert outcome.error is None
+    assert outcome.path[-1] == "keep_pages"
+    assert "bot bloqueado" in caplog.text
+
+
+def test_two_topics_short_of_pages_fail_the_lesson_with_no_warning() -> None:
+    warnings: list[str] = []
+    fake = FakeSearch(*[found(PAGES[0])] * 4)
+    answers = [answer(3, 2), pick([1], "a"), pick([1]), pick([1], "b"), pick([1])]
+
+    outcome = run(CATALOG, answers, fake, warnings)
+
+    assert isinstance(outcome.error, LessonError)
+    assert str(outcome.error) == (
+        "Nenhum tema teve pelo menos 2 páginas boas: "
+        "Como o Congresso derruba um veto; Os três Poderes."
+    )
+    assert outcome.step == "busca das fontes"
+    assert outcome.path == [
+        "choose_topic",
+        "search",
+        "pick_pages",
+        "search",
+        "pick_pages",
+        "next_topic",
+        "search",
+        "pick_pages",
+        "search",
+        "pick_pages",
+        "next_topic",
+    ]
+    assert [usage.step for usage in outcome.usages] == ["choice"] + ["pick"] * 4
+    assert len(fake.calls) == 4
+    assert warnings == []
+
+
+def test_a_search_error_stops_the_lesson_at_once() -> None:
+    fake = FakeSearch(UsageLimitExceededError("créditos acabaram"))
+
+    outcome = run(CATALOG, [answer(3, 2)], fake)
+
+    assert isinstance(outcome.error, SearchError)
+    assert outcome.step == "busca das fontes"
+    assert outcome.path == ["choose_topic", "search"]
+    assert len(fake.calls) == 1
+
+
+def test_a_pick_no_model_answers_fails_the_lesson() -> None:
+    fake = FakeSearch(found(*PAGES))
+
+    outcome = run(CATALOG, [answer(3, 2), "não é json", "nem isto"], fake)
+
+    assert isinstance(outcome.error, TextError)
+    assert outcome.step == "busca das fontes"
+
+
+def test_a_choice_that_counts_as_none_still_counts_in_the_usages() -> None:
+    outcome = run(CATALOG, [answer(0, 0), pick([1, 2])], FakeSearch(found(*PAGES)))
+
+    assert [usage.step for usage in outcome.usages] == ["choice", "pick"]
 
 
 def test_a_run_with_no_candidate_fails_at_the_topic_step_without_raising() -> None:
