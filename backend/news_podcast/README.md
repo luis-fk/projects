@@ -5,10 +5,14 @@ happened in the previous 24 hours, from the feeds registered in the admin. It ar
 around 7:00 and, by default, lasts 12 to 18 minutes (8 to 12 at 1.5x). Feeds, length,
 speed, models, prices and prompts change in the Django admin (see *Settings*). The
 episode is only that voice message: each run's cost and result stay in the admin's
-history, and the sources it used, in the run's log on Railway.
+history, and the sources it used, in the run's log on Railway. The `lesson` action
+makes a lesson of under 10 minutes on one topic of the course in the admin, from
+pages of trusted sites (see *Lesson graph*). The cron makes one too, every few days
+set in *Lesson settings*, and the lessons go to your own chat with the bot.
 
 The app has its own database, `news_podcast_db` (`NEWS_PODCAST_DATABASE_URL`), with the
-settings, the feeds and the history. The rest is a management command.
+settings, the feeds, the lesson catalog and the history. The rest is a management
+command.
 
 ## How it works
 
@@ -34,12 +38,14 @@ The daily episode runs on a Railway Cron service (see *Scheduling*).
   `NEWS_PODCAST_DATABASE_URL` also on the backend service (the admin uses the database),
   and the migrations applied (`make migrate-prod`, which reads `.env.production`).
 - **Starting data:** `make seed` fills a local database from `news_podcast/seed/`:
-  the settings row from `settings.json` when there is none, and the feeds from
-  `feeds.json` when the list is empty. So a value changed or a feed added in `seed/`
-  after a database was seeded reaches it only through the admin. Production already
-  has its data, so `make seed-prod` writes nothing there today: it runs only when
-  `PLAN.md` says so, for a release that brings starting data for a new table, and
-  it shows the database's address and asks for `yes`.
+  the settings rows from `settings.json` and `lesson_settings.json` when they are
+  missing, the feeds from
+  `feeds.json` when the list is empty, and the lesson catalog from `catalog.json`
+  when it has no area. So a value changed or a feed added in `seed/`
+  after a database was seeded reaches it only through the admin. `make seed-prod`
+  runs only when `PLAN.md` says so, for a release that brings starting data for a
+  new table, such as the lesson catalog, and it shows the database's address and
+  asks for `yes`.
 - **Your chat:** with `TELEGRAM_BOT_TOKEN` in `.env`, run
   `uv run python manage.py news_podcast chat-id` from the `backend/` folder. The bot sends
   you the conversation's number, which goes in the service's `TELEGRAM_CHAT_ID` (see
@@ -55,7 +61,8 @@ A Cron service in the Railway project, from the same repository:
 2. In *Variables*: `RAILPACK_DEPLOY_APT_PACKAGES=ffmpeg` (installs ffmpeg on this
    service only), `GEMINI_API_KEY`, `OPENAI_API_KEY` (only if a text model is OpenAI's),
    `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ADMIN_CHAT_ID` and
-   `NEWS_PODCAST_DATABASE_URL`. To start, Django also needs `SECRET_KEY`,
+   `NEWS_PODCAST_DATABASE_URL`, plus `TAVILY_API_KEY` (the web service's) for the
+   lessons. To start, Django also needs `SECRET_KEY`,
    `API_TOKEN_SECRET` (32 characters or more), `OPEN_WEATHER_API_KEY`, `SERVER_URL`,
    `NGROK_URL`, `FRONT_END_URL`, `ENVIRONMENT=development` (so it doesn't ask for
    `REDIS_URL`) and the other four `*_DATABASE_URL`. Dummy values work for those (the
@@ -70,17 +77,33 @@ minutes before the episode's hour (`40 21 * * *` sends around 19:00 in Brasília
 the midnight episode (cron between 23:00 and 0:00 in Brasília): it would arrive before
 midnight, already dated the next day. A run only starts if the previous one has ended.
 
+**Lessons:** the cron's run makes a lesson after the episode when *A lesson every
+(days)* in *Lesson settings* says one is due; blank, it makes none. A lesson is due once
+that many São Paulo days passed since the latest lesson sent, a lesson made with the
+`lesson` action included (a failed or unsent one doesn't count), so with none sent the
+first one comes on the first run. Only runs with `--scheduled` make lessons: the cron's
+and *Run now*, which uses its command; a local run without it makes none. Without the
+*Lesson settings* row, each of those runs reports it. The episode always goes first and
+saves its row; then the lesson reads the settings again, so ticking *Paused* while the
+episode runs stops the lesson too. Each part reports its own failure, a failed lesson
+leaves the episode as it went, and the run fails naming each failed part. A lesson after
+a failed episode still uses the stories it selected, and says the news didn't go out.
+With the lesson, a run can last up to 3.5 hours: 2 for the episode and 90 minutes for
+the lesson.
+
 A backend deploy also redeploys this service and kills a running execution, with no
 grace period. So releases to `main` stay out of the episode's time, from 6:40 until it
-arrives.
+arrives, and on lesson days until the lesson arrives.
 
 To run it by hand, use the service's *Run now* or `railway cron run`. Since it is the
-cron's command, it respects the pause and reads the news up to the full hour it started
-in. Run locally without `--scheduled`, it reads the news up to the moment it starts.
+cron's command, it respects the pause, reads the news up to the full hour it started in
+and makes the lesson when one is due. Run locally without `--scheduled`, it reads the
+news up to the moment it starts.
 
 ## Sending to a group
 
-The bot only sends to the `TELEGRAM_CHAT_ID` conversation. Someone who just opens the bot
+The bot sends the episode only to the `TELEGRAM_CHAT_ID` conversation (the lessons and
+the notices go to `TELEGRAM_ADMIN_CHAT_ID`, see step 3). Someone who just opens the bot
 and sends `/start` gets nothing. For more people to listen, use a group:
 
 1. In Telegram, create a group with the people and add the bot (search for its @). If
@@ -91,9 +114,10 @@ and sends `/start` gets nothing. For more people to listen, use a group:
    in the last 24 hours, with each one's number. The group shows with 👥 and a negative
    number.
 3. Replace `TELEGRAM_CHAT_ID` with the group's number on the Railway service. From then
-   on the episode goes to the group. Error notices, including one about a send the group
-   refused, go to `TELEGRAM_ADMIN_CHAT_ID` (the number of your conversation with the
-   bot), so they don't show up in the group; without it, they go to the group too.
+   on the episode goes to the group. The lessons and the error notices, including one
+   about a send the group refused, go to `TELEGRAM_ADMIN_CHAT_ID` (the number of your
+   conversation with the bot), so they don't show up in the group; without it, they go
+   to the group too.
 
 If the group isn't in the list (Telegram only keeps the last 24 hours for the bot), send
 `/start@bot_name` in the group and run it again. If Telegram turns the group into a
@@ -108,7 +132,7 @@ the admin. Without it, a run fails at "configurações" and the Settings page sa
 run the seed. Each change applies from the next run on, and an invalid value doesn't
 save: the admin shows the error on the field.
 
-- **Paused:** Railway's runs (the cron and *Run now*) end with no episode.
+- **Paused:** Railway's runs (the cron and *Run now*) end with no episode and no lesson.
 - **Length and speed:** the length is the file's, already at the chosen speed. With
   `1.25`, the script is 25% longer to fit the same time, and the voice costs 25% more.
   The number of stories follows the length (one every minute and a half).
@@ -134,6 +158,14 @@ save: the admin shows the error on the field.
   `NATURAL_WORDS_PER_MINUTE` (the voice's words per minute before ffmpeg); otherwise the
   episode comes out shorter or longer than planned.
 
+**Lesson settings** (*News podcast → Lesson settings*) are a second single row, also
+created only by the seed and shown the same way when it is missing. They hold how often
+the cron makes a lesson (*A lesson every (days)*, see *Scheduling*; blank for none), the
+lesson's minimum and maximum minutes (at least 1, and under 10: `LESSON_MINUTES_LIMIT`
+in `api/lesson/config.py`), its own voice model with its two prices, the choice, pick,
+script and review prompts, and the lesson voice style. The text models, their prices
+and the speech speed come from *Settings*.
+
 ## Feeds
 
 They live in the admin, under *News podcast → Feeds*: outlet, section, URL and whether
@@ -151,17 +183,146 @@ fails at "leitura dos feeds".
   A search brings at most 100 items, so big sites, such as CNN Brasil and Poder360, come
   in by section, and SBT's leaves its videos out (`-site:sbtnews.sbt.com.br/videos`).
 
+## Lesson catalog
+
+The lessons' topics, in 7 areas, live in the admin under *News podcast → Areas* and
+*Topics*. The seed fills an empty catalog once; after that it changes only in the
+admin.
+
+- **Order:** each area's topics are taught by position, from the lowest; areas too.
+  Positions can be edited right in the lists.
+- **Active:** an unticked topic leaves the course without being deleted.
+- **Taught on:** the São Paulo date of the latest lesson that was sent with the topic.
+  Failed and not-sent lessons don't count, and deleting a lesson's row in the history
+  makes its topic available again.
+- **Deleting:** a topic with lessons in the history can't be deleted, nor can its
+  area; untick it instead.
+- **Picking:** each area offers its next topic. A topic tied to one of the day's
+  stories goes first, with the story as the opening; otherwise the area taught
+  least recently goes, and an area never taught goes before any other.
+
+## Lesson sources
+
+Each lesson searches for its pages with Tavily when it is made (`api/lesson/sources.py`),
+only on the trusted sites of `LESSON_SOURCE_DOMAINS` (`api/lesson/config.py`), each
+with its subdomains:
+
+- `leg.br`: the Câmara, the Senado and the Congresso, and the state and city
+  legislatures too;
+- `jus.br`: the courts, the TSE included;
+- `gov.br`: the federal government, with the Banco Central, the IBGE and the Tesouro,
+  and the state and city governments too;
+- Politize! and Agência Brasil.
+
+The pick leaves out pages about something else. Wikipedia isn't on the list, by the
+owner's choice. Neither is ICL Notícias: a search covers its whole site, opinion
+pieces included. The code checks each result's host again and keeps only pages with
+text. Nothing is downloaded, since the text comes from Tavily.
+
+- **The pick:** a text model picks up to 3 pages, best first, and may ask for one more
+  search with other words.
+- **At least 2 pages:** with fewer, the next topic is tried, with a warning to the
+  admin chat naming the skipped one. A lesson searches at most 2 topics, twice each, so
+  it spends 8 Tavily credits at most; the history doesn't count them.
+- **Key:** the search needs `TAVILY_API_KEY`. Without it, or when Tavily fails, the
+  lesson fails at "busca das fontes".
+
+## Lesson script
+
+One text request writes the lesson as a dialogue from its pages only: Bia explains
+and Léo asks, it opens from the motivating story when there is one, cites its sources
+by name, builds on the area's earlier lessons and closes with a short recap
+(`api/lesson/script.py`).
+
+- **Length:** the lesson's minimum and maximum minutes (6 to 9 in the seed) at 150
+  words a minute (`LESSON_WORDS_PER_MINUTE`), times the speech speed. A script more
+  than 1.1 times the maximum is asked again, so a lesson stays under 10 minutes; a
+  short one is fine, and there is no request to lengthen it.
+- **Review:** a second request checks the script against its pages. It removes or
+  corrects what they don't support and any changing figure without a date. It may cut
+  and correct, but adds no turn: a reviewed script with more turns, more than 5%
+  longer, or over the lesson's ceiling is asked again. Each change goes to the log. When no model gives a valid review, there is no lesson that day.
+
+## Lesson graph
+
+The lesson runs as a LangGraph graph (`api/lesson/graph.py`, the only module that
+imports langgraph). Each node is an async function of the lesson's state and the
+run's context, and a failure keeps the step it happened at and the cost paid so far.
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	choose_topic(choose_topic)
+	search(search)
+	pick_pages(pick_pages)
+	next_topic(next_topic)
+	keep_pages(keep_pages)
+	write_script(write_script)
+	review_script(review_script)
+	narrate(narrate)
+	build_audio(build_audio)
+	send(send)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> choose_topic;
+	build_audio -. &nbsp;not_sending&nbsp; .-> __end__;
+	build_audio -. &nbsp;sending&nbsp; .-> send;
+	choose_topic --> search;
+	keep_pages --> write_script;
+	narrate --> build_audio;
+	next_topic --> search;
+	pick_pages -. &nbsp;enough_pages&nbsp; .-> keep_pages;
+	pick_pages -. &nbsp;too_few_pages&nbsp; .-> next_topic;
+	pick_pages -. &nbsp;other_terms&nbsp; .-> search;
+	review_script --> narrate;
+	search --> pick_pages;
+	write_script --> review_script;
+	send --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
+
+The last nodes voice the lesson, build its file and send it (`api/lesson/delivery.py`):
+
+- **Voice:** the lesson's own voice model, from *Lesson settings*, so it has its own
+  free daily quota, read in the lesson voice style. Like the daily's, it has no
+  fallback: an unavailable voice gets the waits of `VOICE_RETRY_MINUTES` (10 and 20
+  minutes), and a used-up quota or a refused request fails the lesson at once.
+- **Audio:** `news_podcast_output/aula-YYYY-MM-DD.ogg`, at the speech speed of
+  *Settings*. A lesson over 10 minutes still goes out, with a warning to lower the
+  maximum minutes or recalibrate `LESSON_WORDS_PER_MINUTE`.
+- **Sending:** one voice message to the chat that gets the notices: your chat with the
+  bot (`TELEGRAM_ADMIN_CHAT_ID`), or `TELEGRAM_CHAT_ID` without it. The caption has the
+  topic, its area and a link to each page under its title, cut so the caption fits
+  Telegram's 1,024 characters.
+- **Failures:** the admin chat gets "Não consegui gerar a aula de hoje" with the step
+  and the error; with `--no-send`, only the log does. A lesson stops after 90 minutes
+  (`MAX_LESSON_MINUTES`).
+
 ## History
 
-Under *News podcast → Episodes*, one row per run: start time (Brasília), status (sent,
-failed or, with `--no-send`, not sent), length, words per minute, cost on the paid plan
-in reais and, if it failed, the step and the error. Each run's page shows the script's
-words and the tokens of each model answer. At 1x speed, the words per minute are the
-voice's pace: if they are far from 170, `NATURAL_WORDS_PER_MINUTE` in
-`api/core/config.py` needs adjusting, or the episode comes out shorter or longer than
-asked. The audio is not kept. The top of the list shows the total cost of what is
-filtered (by month or by status). A paused run doesn't show up, and one that fails
-midway records the cost of what already ran.
+Under *News podcast → Episodes*, one row per run: start time (Brasília), kind (news or
+lesson), status (sent, failed or, with `--no-send`, not sent), length, words per
+minute, cost on the paid plan in reais and, if it failed, the step and the error. Each
+run's page shows the script's words and the tokens of each model answer. At 1x speed,
+the words per minute are the voice's pace: if they are far from 170,
+`NATURAL_WORDS_PER_MINUTE` in `api/core/config.py` needs adjusting, or the episode
+comes out shorter or longer than asked (for a lesson, 150 and
+`LESSON_WORDS_PER_MINUTE` in `api/lesson/config.py`). The audio is not kept. The top of
+the list shows the total cost of what is filtered (by month, kind or status). A paused
+run doesn't show up, and one that fails midway records the cost of what already ran.
+
+A lesson's page also shows its topic, the news story that opened it and the pages it
+came from, which a failed lesson keeps once its pages were found. Its cost counts the
+text at the prices in *Settings* and the voice at those in *Lesson settings*, plus
+the day's selection when the `lesson` action made it. If its topic is deleted in the
+admin while it runs, the row is saved without it, with the topic's title in the
+error, and the admin chat is told.
 
 ## Adjustments
 
@@ -181,10 +342,19 @@ the keys and `NEWS_PODCAST_DATABASE_URL` in `.env`, the migrations applied and
 
 ```
 uv run python manage.py news_podcast episode --no-send
+uv run python manage.py news_podcast lesson --no-send
 ```
 
-The audio and the selection's and the script's JSON go to `backend/news_podcast_output/`,
-which is in `.gitignore`.
+The audio and the episode's selection and script JSON go to
+`backend/news_podcast_output/`, which is in `.gitignore`. The `lesson` action, which
+also needs `TAVILY_API_KEY`, reads the feeds and makes the day's selection, as the
+episode does, then makes a lesson with no episode, so the lesson never says the news
+went out. Without `--no-send` it goes to the chat that gets the notices (see *Sending*
+under *Lesson graph*) and counts as taught. A *Lesson settings* row seeded before the
+lesson's prompts were final keeps the old ones: paste the prompts from
+`seed/lesson_settings.json` in the admin, or delete the row and run `make seed` again.
+One seeded before *A lesson every (days)* existed has it blank, so the cron makes no
+lessons until it is set in the admin.
 
 ## Good to know
 

@@ -85,6 +85,9 @@ def broken_rules(module: str, imports: set[str]) -> list[str]:
         forbidden.append(EPISODE)
     if module not in ORM_MODULES and not inside(module, COMMANDS):
         forbidden.append(MODELS)
+    if module != f"{LESSON}.graph":
+        # The lesson's graph is the only module that knows LangGraph.
+        forbidden.append("langgraph")
     if inside(module, MIGRATIONS):
         # A migration is schema only: app code it imported would have to stay for as
         # long as the migration does.
@@ -110,6 +113,20 @@ def broken_voice_rules(module: str, found: list[tuple[str, str | None]]) -> list
         if not any(inside(origin, allowed) for allowed in VOICE_INTERFACE):
             broken.append(f"{module} imports {target}, from {origin}")
     return broken
+
+
+@pytest.mark.parametrize(
+    ("module", "allowed"),
+    [(f"{LESSON}.graph", True), (f"{LESSON}.topics", False), (f"{CORE}.llm", False)],
+)
+def test_only_the_lesson_graph_may_import_langgraph(module: str, allowed: bool) -> None:
+    assert (broken_rules(module, {"langgraph.graph"}) == []) is allowed
+
+
+def test_the_rules_read_the_lesson_package() -> None:
+    modules = {module_name(path) for path in APP_DIR.rglob("*.py")}
+
+    assert {f"{LESSON}.config", f"{LESSON}.prompts"} <= modules
 
 
 def test_the_app_follows_its_import_rules() -> None:

@@ -3,6 +3,7 @@ from string import Formatter
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models import Max, Q
 
 from news_podcast.api.core.config import (
     LOCAL_TZ,
@@ -16,6 +17,9 @@ from news_podcast.api.core.voice.providers import voice_model_error
 from news_podcast.api.episode import prompts
 from news_podcast.api.episode.feeds import GOOGLE_NEWS_HOST
 from news_podcast.api.episode.schemas import EpisodeOptions, FeedSource
+from news_podcast.api.lesson import prompts as lesson_prompts
+from news_podcast.api.lesson.config import LESSON_MINUTES_LIMIT
+from news_podcast.api.lesson.schemas import CatalogTopic
 
 SLOWEST, FASTEST = SPEECH_SPEED_LIMITS
 BRACES_HELP = "Write a literal brace as {{ or }}."
@@ -23,6 +27,12 @@ PROMPT_FIELDS = {
     "selection_prompt": prompts.SELECTION_FIELDS,
     "script_prompt": prompts.SCRIPT_FIELDS,
     "expand_prompt": prompts.EXPAND_FIELDS,
+}
+LESSON_PROMPT_FIELDS = {
+    "choice_prompt": lesson_prompts.CHOICE_FIELDS,
+    "pick_prompt": lesson_prompts.PICK_FIELDS,
+    "script_prompt": lesson_prompts.SCRIPT_FIELDS,
+    "review_prompt": lesson_prompts.REVIEW_FIELDS,
 }
 
 
@@ -183,6 +193,105 @@ class PodcastSettings(models.Model):
         }
 
 
+class LessonSettings(models.Model):
+    """The lesson settings, edited in the Django admin. A single row of its own, which
+    only seed_news_podcast creates; the text models, their prices and the speech
+    speed come from PodcastSettings."""
+
+    every_days = models.PositiveSmallIntegerField(
+        "a lesson every (days)",
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text="The cron's run makes one after its episode once this many São Paulo "
+        "days have passed since the latest lesson sent. Blank: no lessons from the "
+        "cron.",
+    )
+    min_minutes = models.PositiveSmallIntegerField(
+        "minimum minutes",
+        validators=[MinValueValidator(1)],
+        help_text="Length of the lesson's file, at the speech speed in Settings.",
+    )
+    max_minutes = models.PositiveSmallIntegerField(
+        "maximum minutes",
+        help_text=f"Under {LESSON_MINUTES_LIMIT}: a lesson stays short.",
+    )
+    voice_model = models.CharField(
+        max_length=100,
+        help_text="A model other than the episode's voice, so each keeps its own "
+        "daily quota.",
+    )
+    voice_input_price = models.FloatField(
+        "input price", validators=[MinValueValidator(0)]
+    )
+    voice_output_price = models.FloatField(
+        "output price", validators=[MinValueValidator(0)]
+    )
+    choice_prompt = models.TextField(
+        help_text="Picks the topic among the candidates, when one connects to a "
+        "story. " + placeholders_help(lesson_prompts.CHOICE_FIELDS)
+    )
+    pick_prompt = models.TextField(
+        help_text="Picks the pages among the search results. "
+        + placeholders_help(lesson_prompts.PICK_FIELDS)
+    )
+    script_prompt = models.TextField(
+        help_text=placeholders_help(lesson_prompts.SCRIPT_FIELDS)
+    )
+    review_prompt = models.TextField(
+        help_text="Checks the script against its pages. "
+        + placeholders_help(lesson_prompts.REVIEW_FIELDS)
+    )
+    voice_style = models.TextField(help_text="How the hosts talk in a lesson.")
+
+    class Meta:
+        verbose_name = "lesson settings"
+        verbose_name_plural = "lesson settings"
+
+    def __str__(self) -> str:
+        return "Lesson settings"
+
+    def clean(self) -> None:
+        errors: dict[str, str] = {}
+        # As in PodcastSettings, each check runs only on a value of its type.
+        minimum, maximum = self.min_minutes, self.max_minutes
+        if isinstance(minimum, int) and isinstance(maximum, int):
+            if minimum > maximum:
+                errors["max_minutes"] = "Must not be less than the minimum."
+            elif maximum >= LESSON_MINUTES_LIMIT:
+                errors["max_minutes"] = (
+                    f"Must be under {LESSON_MINUTES_LIMIT} minutes "
+                    "(LESSON_MINUTES_LIMIT in api/lesson/config.py)."
+                )
+        voice = self.voice_model
+        if isinstance(voice, str) and voice and (error := voice_model_error(voice)):
+            errors["voice_model"] = error
+        for name, fields in LESSON_PROMPT_FIELDS.items():
+            prompt = getattr(self, name)
+            if isinstance(prompt, str) and (error := placeholder_error(prompt, fields)):
+                errors[name] = error
+        if errors:
+            raise ValidationError(errors)
+
+    @classmethod
+    def load(cls) -> "LessonSettings":
+        """The lesson settings row, which only seed_news_podcast creates."""
+        lesson_settings = cls.objects.order_by("pk").first()
+        if lesson_settings is None:
+            raise SettingsMissing(
+                "Não há configurações da aula no banco: rode seed_news_podcast "
+                "(make seed no local, make seed-prod em produção)."
+            )
+        return lesson_settings
+
+    def prices(self) -> dict[str, ModelPrice]:
+        return {
+            self.voice_model: ModelPrice(
+                self.voice_input_price, self.voice_output_price
+            )
+        }
+
+
 class Feed(models.Model):
     """A news feed the episodes read, edited in the Django admin. The list comes from
     seed_news_podcast, and an empty list stays empty."""
@@ -233,9 +342,93 @@ class Feed(models.Model):
         )
 
 
+class Area(models.Model):
+    """An area of the lesson course, edited in the Django admin."""
+
+    name = models.CharField(max_length=100)
+    position = models.PositiveSmallIntegerField(
+        help_text="The area's place in the course: the lowest comes first."
+    )
+
+    class Meta:
+        ordering = ["position", "pk"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+# The area's pk keeps an area's topics together when two areas share a position.
+TEACHING_ORDER = ["area__position", "area__pk", "position", "pk"]
+
+
+class TopicQuerySet(models.QuerySet["Topic"]):
+    def with_taught_at(self) -> "TopicQuerySet":
+        """Each topic with taught_at: when its latest sent lesson started, or None.
+        The aggregate's GROUP BY drops Meta.ordering, so the teaching order is set
+        again."""
+        return self.annotate(
+            taught_at=Max(
+                "lessons__started_at",
+                filter=Q(
+                    lessons__kind=Episode.Kind.LESSON,
+                    lessons__status=Episode.Status.SENT,
+                ),
+            )
+        ).order_by(*TEACHING_ORDER)
+
+
+class Topic(models.Model):
+    """A lesson topic, in its area's teaching order, edited in the Django admin."""
+
+    area = models.ForeignKey(Area, on_delete=models.CASCADE, related_name="topics")
+    position = models.PositiveSmallIntegerField(
+        help_text="The topic's place in its area's teaching order."
+    )
+    title = models.CharField(max_length=200)
+    active = models.BooleanField(
+        default=True, help_text="Unticked, the lessons skip it."
+    )
+
+    objects = TopicQuerySet.as_manager()
+
+    class Meta:
+        ordering = TEACHING_ORDER
+
+    def __str__(self) -> str:
+        return self.title
+
+    @classmethod
+    def catalog(cls) -> list[CatalogTopic]:
+        """The catalog as the lesson reads it, in teaching order. A topic's taught_on
+        is the São Paulo date of its latest sent lesson."""
+        catalog: list[CatalogTopic] = []
+        for topic in cls.objects.with_taught_at().select_related("area"):
+            # The annotation from with_taught_at(), which the stubs can't see.
+            taught_at = getattr(topic, "taught_at")
+            catalog.append(
+                CatalogTopic(
+                    id=topic.pk,
+                    area_id=topic.area_id,
+                    area=topic.area.name,
+                    area_position=topic.area.position,
+                    position=topic.position,
+                    title=topic.title,
+                    active=topic.active,
+                    taught_on=None
+                    if taught_at is None
+                    else taught_at.astimezone(LOCAL_TZ).date(),
+                )
+            )
+        return catalog
+
+
 class Episode(models.Model):
-    """One run of the podcast, kept for its cost and its outcome. The audio is not
-    kept."""
+    """One run of the podcast or of a lesson, kept for its cost and its outcome. The
+    audio is not kept."""
+
+    class Kind(models.TextChoices):
+        NEWS = "news", "News"
+        LESSON = "lesson", "Lesson"
 
     class Status(models.TextChoices):
         SENT = "sent", "Sent"
@@ -255,6 +448,27 @@ class Episode(models.Model):
     )
     usage = models.JSONField(default=list, help_text="Tokens of each model answer.")
     error = models.TextField(blank=True, help_text="The step that failed and why.")
+    # The database defaults let the code still on main insert rows once this
+    # migration ran. The new code needs the new columns, so the migration runs first.
+    kind = models.CharField(max_length=10, choices=Kind.choices, db_default=Kind.NEWS)
+    topic = models.ForeignKey(
+        Topic,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="lessons",
+        help_text="The lesson's topic. A topic with lessons can't be deleted.",
+    )
+    story_title = models.TextField(
+        blank=True,
+        db_default="",
+        help_text="The news story that opened the lesson, if any.",
+    )
+    pages = models.JSONField(
+        blank=True,
+        db_default=[],
+        help_text="The pages the lesson came from, each with its title and URL.",
+    )
 
     class Meta:
         ordering = ["-started_at"]

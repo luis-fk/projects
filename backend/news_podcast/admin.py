@@ -4,17 +4,29 @@ from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.widgets import AdminTextareaWidget
 from django.core.exceptions import PermissionDenied
-from django.db.models import Sum
+from django.db import models
+from django.db.models import QuerySet, Sum
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
+from django.utils.html import format_html_join
+from django.utils.safestring import SafeString
 from django.utils.text import Truncator
 
 from news_podcast.api.core.config import LOCAL_TZ
 from news_podcast.api.core.messages import brl
-from news_podcast.models import Episode, Feed, PodcastSettings, SettingsMissing
+from news_podcast.models import (
+    Area,
+    Episode,
+    Feed,
+    LessonSettings,
+    PodcastSettings,
+    SettingsMissing,
+    Topic,
+)
 
 LONG_PROMPTS = ["selection_prompt", "script_prompt"]
+LESSON_PROMPTS = ["choice_prompt", "pick_prompt", "script_prompt", "review_prompt"]
 NUMBERS = [
     "speech_speed",
     "text_input_price",
@@ -40,8 +52,55 @@ class PodcastSettingsForm(forms.ModelForm):
         }
 
 
+class LessonSettingsForm(forms.ModelForm):
+    class Meta:
+        model = LessonSettings
+        fields = "__all__"
+        widgets = {
+            **{
+                name: AdminTextareaWidget(attrs={"rows": 30}) for name in LESSON_PROMPTS
+            },
+            **{
+                name: forms.NumberInput(attrs={"class": "vIntegerField"})
+                for name in ["voice_input_price", "voice_output_price"]
+            },
+        }
+
+
+class SettingsRowAdmin(admin.ModelAdmin):
+    """A single settings row, which only seed_news_podcast creates. These permissions
+    must not query the database: the admin checks them on every page, for its
+    menu."""
+
+    def load_row(self) -> models.Model:
+        raise NotImplementedError
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        return False
+
+    def has_delete_permission(
+        self, request: HttpRequest, obj: models.Model | None = None
+    ) -> bool:
+        return False
+
+    def changelist_view(
+        self, request: HttpRequest, extra_context: dict[str, Any] | None = None
+    ) -> HttpResponse:
+        # Django checks the permission only in the list it renders, after the row
+        # would have been read and its link or the seed message shown.
+        if not self.has_view_or_change_permission(request):
+            raise PermissionDenied
+        # The list goes straight to the form of the single row.
+        try:
+            row = self.load_row()
+        except SettingsMissing as error:
+            self.message_user(request, str(error), messages.ERROR)
+            return super().changelist_view(request, extra_context)
+        return redirect(f"admin:news_podcast_{self.opts.model_name}_change", row.pk)
+
+
 @admin.register(PodcastSettings)
-class PodcastSettingsAdmin(admin.ModelAdmin):
+class PodcastSettingsAdmin(SettingsRowAdmin):
     form = PodcastSettingsForm
     fieldsets = [
         (None, {"fields": ["paused"]}),
@@ -79,32 +138,33 @@ class PodcastSettingsAdmin(admin.ModelAdmin):
         ),
     ]
 
-    # A single row, which only seed_news_podcast creates. These permissions must not
-    # query the database: the admin checks them on every page, for its menu.
-    def has_add_permission(self, request: HttpRequest) -> bool:
-        return False
+    def load_row(self) -> PodcastSettings:
+        return PodcastSettings.load()
 
-    def has_delete_permission(
-        self, request: HttpRequest, obj: PodcastSettings | None = None
-    ) -> bool:
-        return False
 
-    def changelist_view(
-        self, request: HttpRequest, extra_context: dict[str, Any] | None = None
-    ) -> HttpResponse:
-        # Django checks the permission only in the list it renders, after the row
-        # would have been read and its link or the seed message shown.
-        if not self.has_view_or_change_permission(request):
-            raise PermissionDenied
-        # The list goes straight to the form of the single row.
-        try:
-            podcast_settings = PodcastSettings.load()
-        except SettingsMissing as error:
-            self.message_user(request, str(error), messages.ERROR)
-            return super().changelist_view(request, extra_context)
-        return redirect(
-            "admin:news_podcast_podcastsettings_change", podcast_settings.pk
-        )
+@admin.register(LessonSettings)
+class LessonSettingsAdmin(SettingsRowAdmin):
+    form = LessonSettingsForm
+    fieldsets = [
+        ("Lesson", {"fields": ["every_days", ("min_minutes", "max_minutes")]}),
+        (
+            "Voice",
+            {
+                "description": "The text models, their prices and the speech speed "
+                "come from Settings. Prices in US$ per million tokens; a lesson's "
+                "cost uses them for its voice.",
+                "fields": [
+                    "voice_model",
+                    ("voice_input_price", "voice_output_price"),
+                    "voice_style",
+                ],
+            },
+        ),
+        ("Prompts", {"fields": LESSON_PROMPTS}),
+    ]
+
+    def load_row(self) -> LessonSettings:
+        return LessonSettings.load()
 
 
 @admin.register(Feed)
@@ -115,14 +175,51 @@ class FeedAdmin(admin.ModelAdmin):
     search_fields = ["outlet", "url"]
 
 
+@admin.register(Area)
+class AreaAdmin(admin.ModelAdmin):
+    list_display = ["name", "position"]
+    list_editable = ["position"]
+
+
+@admin.register(Topic)
+class TopicAdmin(admin.ModelAdmin):
+    list_display = ["title", "area", "position", "active", "taught"]
+    list_editable = ["position", "active"]
+    list_filter = ["area", "active"]
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[Topic]:
+        return super().get_queryset(request).with_taught_at().select_related("area")
+
+    # A topic is taught when a sent lesson row points to it.
+    @admin.display(description="taught on (Brasília)", ordering="taught_at")
+    def taught(self, topic: Topic) -> str:
+        # The annotation from with_taught_at(), which the stubs can't see.
+        taught_at = getattr(topic, "taught_at")
+        if taught_at is None:
+            return "-"
+        return f"{taught_at.astimezone(LOCAL_TZ):%d/%m/%Y}"
+
+
 @admin.register(Episode)
 class EpisodeAdmin(admin.ModelAdmin):
-    list_display = ["started", "status", "length", "pace", "cost", "short_error"]
-    list_filter = ["status"]
+    list_display = [
+        "started",
+        "kind",
+        "status",
+        "length",
+        "pace",
+        "cost",
+        "short_error",
+    ]
+    list_filter = ["kind", "status"]
     date_hierarchy = "started_at"
     fields = [
         "started",
+        "kind",
         "status",
+        "topic",
+        "story_title",
+        "page_list",
         "length",
         "script_words",
         "pace",
@@ -131,7 +228,7 @@ class EpisodeAdmin(admin.ModelAdmin):
         "usage",
         "error",
     ]
-    readonly_fields = ["started", "length", "pace", "cost"]
+    readonly_fields = ["started", "page_list", "length", "pace", "cost"]
 
     # The history is written by the runs only.
     def has_add_permission(self, request: HttpRequest) -> bool:
@@ -168,6 +265,17 @@ class EpisodeAdmin(admin.ModelAdmin):
     @admin.display(description="error")
     def short_error(self, episode: Episode) -> str:
         return Truncator(episode.error).chars(80)
+
+    @admin.display(description="pages")
+    def page_list(self, episode: Episode) -> SafeString | str:
+        if not episode.pages:
+            return "-"
+        # Text, not links: the URLs come from a web search.
+        return format_html_join(
+            "\n",
+            "{}: {}<br>",
+            ((page.get("title", ""), page.get("url", "")) for page in episode.pages),
+        )
 
     def changelist_view(
         self, request: HttpRequest, extra_context: dict[str, Any] | None = None

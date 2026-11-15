@@ -10,7 +10,7 @@ from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import models, router, transaction
 
-from news_podcast.models import Feed, PodcastSettings
+from news_podcast.models import Area, Feed, LessonSettings, PodcastSettings, Topic
 
 SEED_DIR = Path(__file__).resolve().parents[2] / "seed"
 # An empty host, or a path, is PostgreSQL's socket on this machine.
@@ -19,9 +19,10 @@ LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
 
 class Command(BaseCommand):
     help = (
-        "Fills news_podcast's database from news_podcast/seed/: the settings row when "
-        "there is none and the feeds when the list is empty, never changing a row. "
-        "Only local databases or, with --production, the one shown after you confirm."
+        "Fills news_podcast's database from news_podcast/seed/: the settings and the "
+        "lesson settings rows when there are none, and the feeds and the lesson "
+        "catalog when they are empty, never changing a row. Only local databases or, "
+        "with --production, the one shown after you confirm."
     )
 
     def add_arguments(self, parser: CommandParser) -> None:
@@ -34,6 +35,8 @@ class Command(BaseCommand):
     def handle(self, *args: Any, production: bool, **options: Any) -> None:
         podcast_settings = settings_row(read_seed_file("settings.json"))
         feeds = feed_rows(read_seed_file("feeds.json"))
+        catalog = catalog_rows(read_seed_file("catalog.json"))
+        lesson_settings = lesson_settings_row(read_seed_file("lesson_settings.json"))
         database = router.db_for_write(PodcastSettings)
         if production:
             self.confirm(database)
@@ -42,6 +45,8 @@ class Command(BaseCommand):
         with transaction.atomic(using=database):
             self.seed_settings(podcast_settings)
             self.seed_feeds(feeds)
+            self.seed_catalog(catalog)
+            self.seed_lesson_settings(lesson_settings)
 
     def confirm(self, database: str) -> None:
         config = settings.DATABASES[database]
@@ -65,6 +70,32 @@ class Command(BaseCommand):
         Feed.objects.bulk_create(feeds)
         self.stdout.write(
             f"news_podcast: {len(feeds)} feeds created from seed/feeds.json"
+        )
+
+    def seed_lesson_settings(self, lesson_settings: LessonSettings) -> None:
+        if LessonSettings.objects.exists():
+            self.stdout.write(
+                "news_podcast: the lesson settings row already exists; left as it was"
+            )
+            return
+        lesson_settings.save()
+        self.stdout.write(
+            "news_podcast: lesson settings created from seed/lesson_settings.json"
+        )
+
+    def seed_catalog(self, catalog: list[tuple[Area, list[Topic]]]) -> None:
+        if Area.objects.exists():
+            self.stdout.write("news_podcast: the catalog isn't empty; left as it was")
+            return
+        for area, topics in catalog:
+            area.save()
+            for topic in topics:
+                topic.area = area
+        Topic.objects.bulk_create([topic for _, topics in catalog for topic in topics])
+        count = sum(len(topics) for _, topics in catalog)
+        self.stdout.write(
+            f"news_podcast: {len(catalog)} areas and {count} topics created from "
+            "seed/catalog.json"
         )
 
 
@@ -107,6 +138,14 @@ def settings_row(values: Any) -> PodcastSettings:
     return podcast_settings
 
 
+def lesson_settings_row(values: Any) -> LessonSettings:
+    where = "seed/lesson_settings.json"
+    check_fields(values, LessonSettings, where)
+    lesson_settings = LessonSettings(**values)
+    check_values(lesson_settings, where)
+    return lesson_settings
+
+
 def feed_rows(entries: Any) -> list[Feed]:
     if not isinstance(entries, list) or not entries:
         raise CommandError("seed/feeds.json must be a list of feeds")
@@ -123,10 +162,39 @@ def feed_rows(entries: Any) -> list[Feed]:
     return feeds
 
 
+def catalog_rows(entries: Any) -> list[tuple[Area, list[Topic]]]:
+    """Each area with its topics, in teaching order: positions come from the order
+    in the file."""
+    if not isinstance(entries, list) or not entries:
+        raise CommandError("seed/catalog.json must be a list of areas")
+    catalog: list[tuple[Area, list[Topic]]] = []
+    for number, values in enumerate(entries, start=1):
+        where = f"seed/catalog.json, area {number}"
+        if not isinstance(values, dict) or set(values) != {"name", "topics"}:
+            raise CommandError(f"{where} must have name and topics, and nothing else")
+        name, titles = values["name"], values["topics"]
+        if not isinstance(name, str):
+            raise CommandError(f"{where}: name must be text")
+        if not isinstance(titles, list) or not titles:
+            raise CommandError(f"{where}: topics must be a list of titles")
+        if not all(isinstance(title, str) for title in titles):
+            raise CommandError(f"{where}: topics must be a list of titles")
+        area = Area(name=name, position=number)
+        check_values(area, where)
+        topics: list[Topic] = []
+        for position, title in enumerate(titles, start=1):
+            topic = Topic(position=position, title=title, active=True)
+            # The area isn't saved yet, so its link is checked when it is.
+            check_values(topic, f"{where}, topic {position}", exclude=["area"])
+            topics.append(topic)
+        catalog.append((area, topics))
+    return catalog
+
+
 def check_fields(values: Any, model: type[models.Model], where: str) -> None:
     """A seed object holds every field the admin edits, each with its JSON type, and
     nothing else. Django would turn a list into its text, 12.7 minutes into 12 and
-    true into 1.0, and let null through a field that may be blank."""
+    true into 1.0, and let null through a field that may be blank but can't hold it."""
     if not isinstance(values, dict):
         raise CommandError(f"{where} isn't a JSON object")
     fields = [
@@ -148,8 +216,11 @@ def check_fields(values: Any, model: type[models.Model], where: str) -> None:
 
 def wrong_json_type(field: "models.Field[Any, Any]", value: Any) -> str | None:
     """The JSON type the field needs, when value doesn't have it. JSON's true and
-    false are bools, never numbers. The annotation is quoted because Django's Field
-    takes type arguments only in its stubs."""
+    false are bools, never numbers, and only a nullable field takes null. The
+    annotation is quoted because Django's Field takes type arguments only in its
+    stubs."""
+    if value is None and field.null:
+        return None
     if isinstance(field, models.BooleanField):
         return None if isinstance(value, bool) else "true or false"
     if isinstance(field, models.IntegerField):
@@ -160,12 +231,14 @@ def wrong_json_type(field: "models.Field[Any, Any]", value: Any) -> str | None:
     return None if isinstance(value, str) else "text"
 
 
-def check_values(row: models.Model, where: str) -> None:
+def check_values(
+    row: models.Model, where: str, exclude: list[str] | None = None
+) -> None:
     """Each field's checks and the model's clean(), as on a save in the admin. Not
     validate_unique: on a seeded database the file's URLs are already in the list,
     and feed_rows checks the file's own repeats."""
     try:
-        row.full_clean(validate_unique=False)
+        row.full_clean(exclude=exclude, validate_unique=False)
     except ValidationError as error:
         problems = "; ".join(
             f"{name}: {' '.join(messages)}"
