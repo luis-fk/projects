@@ -48,8 +48,9 @@ GEMINI_API_KEY = env("GEMINI_API_KEY", default=None)
 OPENAI_API_KEY = env("OPENAI_API_KEY", default=None)
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", default=None)
 TELEGRAM_CHAT_ID = env("TELEGRAM_CHAT_ID", default=None)
-# Where the news podcast reports errors and chat ids, so they stay out of the group
-# in TELEGRAM_CHAT_ID. Without it, they go to TELEGRAM_CHAT_ID too.
+# Where the news podcast sends its lessons and reports errors and chat ids, so they
+# stay out of the group in TELEGRAM_CHAT_ID. Without it, they go to TELEGRAM_CHAT_ID
+# too.
 TELEGRAM_ADMIN_CHAT_ID = env("TELEGRAM_ADMIN_CHAT_ID", default=None)
 
 # SECURITY WARNING: don't run with debug turned on in production!

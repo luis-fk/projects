@@ -22,7 +22,6 @@ from news_podcast.api.core.llm import ModelFactory, TextModels, chat_model
 from news_podcast.api.core.schemas import ModelPrice, NewsStory, Usage
 from news_podcast.api.core.telegram import (
     admin_chat_id,
-    chat_id,
     report_failure,
     telegram_client,
 )
@@ -69,6 +68,18 @@ def lesson_due(today: date, last_sent_on: date | None, every_days: int) -> bool:
     return last_sent_on is None or (today - last_sent_on).days >= every_days
 
 
+def scheduled_lesson_due(today: date, every_days: int | None) -> bool:
+    """Whether the cron's run makes a lesson today: Lesson settings has a cadence
+    and the lesson is due. The log says why not."""
+    if every_days is None:
+        logger.info("No lesson: Lesson settings has no cadence")
+        return False
+    if not lesson_due(today, last_lesson_sent_on(), every_days):
+        logger.info(f"No lesson today: one goes every {every_days} days")
+        return False
+    return True
+
+
 def last_lesson_sent_on() -> date | None:
     """The São Paulo date of the latest lesson sent: a failed or unsent one doesn't
     count."""
@@ -84,15 +95,14 @@ def make_lesson(
     send: bool,
     news_sent: bool,
     scheduled: bool = False,
-    every_days: int | None = None,
     usages: Sequence[Usage] = (),
     model_factory: ModelFactory = chat_model,
 ) -> Exception | None:
     """Makes the lesson and saves it in the history, failed or not, and returns its
-    error, which was already reported. A scheduled run skips it while the podcast
-    is paused, and with `every_days` it runs only when due, both with no row.
-    `usages` are answers paid for before the lesson that belong to its row, such as
-    the day's selection."""
+    error, which was already reported. A scheduled run follows the admin: no lesson
+    while the podcast is paused, nor unless Lesson settings' cadence says one is due,
+    with no row. `usages` are answers paid for before the lesson that belong to its
+    row, such as the day's selection."""
     today = datetime.now(LOCAL_TZ).date()
     # A news episode may have run for up to 2 hours before this, and Django only
     # renews connections between requests.
@@ -102,12 +112,9 @@ def make_lesson(
         if scheduled and podcast_settings.paused:
             logger.info("The podcast is paused in the admin, so there is no lesson")
             return None
-        if every_days is not None and not lesson_due(
-            today, last_lesson_sent_on(), every_days
-        ):
-            logger.info(f"No lesson today: one goes every {every_days} days")
-            return None
         lesson_settings = LessonSettings.load()
+        if scheduled and not scheduled_lesson_due(today, lesson_settings.every_days):
+            return None
         catalog = Topic.catalog()
     except (DatabaseError, SettingsMissing) as error:
         logger.error(f"The lesson couldn't read its settings: {error}")
@@ -173,7 +180,9 @@ async def run_lesson(
     try:
         async with httpx.AsyncClient() as http_client, search_client() as search:
             telegram = telegram_client(http_client)
-            admin_chat = admin_chat_id()
+            # The lessons go where the notices go: the owner's chat, or
+            # TELEGRAM_CHAT_ID without one (the owner's choice).
+            chat = admin_chat_id()
             with tempfile.TemporaryDirectory(prefix="news_podcast_lesson_") as workdir:
                 context = LessonContext(
                     options=options,
@@ -184,11 +193,10 @@ async def run_lesson(
                     ),
                     progress=progress,
                     search=search,
-                    warn=admin_warner(telegram, admin_chat) if send else log_warning,
+                    warn=admin_warner(telegram, chat) if send else log_warning,
                     http_client=http_client,
                     telegram=telegram,
-                    chat=chat_id(),
-                    admin_chat=admin_chat,
+                    chat=chat,
                     workdir=Path(workdir),
                     voice_waits=list(VOICE_RETRY_MINUTES),
                 )

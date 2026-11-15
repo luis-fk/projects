@@ -35,6 +35,7 @@ SETTINGS: dict[str, Any] = {
 # A complete lesson settings row with short values that pass clean(); each prompt
 # uses every placeholder of its tuple.
 LESSON_SETTINGS: dict[str, Any] = {
+    "every_days": 2,
     "min_minutes": 6,
     "max_minutes": 9,
     "voice_model": "gemini-lesson-voice",
@@ -70,9 +71,12 @@ def create_lesson_settings(**changes: Any) -> LessonSettings:
 
 
 def build_lesson_options(**changes: Any) -> LessonOptions:
-    """The snapshot the lesson's nodes read, from the factory's lesson settings."""
+    """The snapshot the lesson's nodes read, from the factory's lesson settings: the
+    cadence and the prices stay out of it."""
     values = {
-        name: value for name, value in LESSON_SETTINGS.items() if "price" not in name
+        name: value
+        for name, value in LESSON_SETTINGS.items()
+        if "price" not in name and name != "every_days"
     }
     return LessonOptions(**{**values, "speech_speed": 1.0, **changes})
 

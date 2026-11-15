@@ -146,7 +146,7 @@ class PodcastSettingsAdmin(SettingsRowAdmin):
 class LessonSettingsAdmin(SettingsRowAdmin):
     form = LessonSettingsForm
     fieldsets = [
-        ("Lesson", {"fields": [("min_minutes", "max_minutes")]}),
+        ("Lesson", {"fields": ["every_days", ("min_minutes", "max_minutes")]}),
         (
             "Voice",
             {

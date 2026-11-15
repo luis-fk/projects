@@ -123,6 +123,7 @@ def test_the_seed_lesson_settings_pass_the_admin_checks() -> None:
     assert (values["min_minutes"], values["max_minutes"]) == (6, 9)
     assert values["voice_model"] == "gemini-3.8-flash-tts"
     assert (values["voice_input_price"], values["voice_output_price"]) == (0.5, 9.0)
+    assert values["every_days"] == 2
 
 
 @pytest.mark.parametrize(("field", "fields"), list(LESSON_PROMPT_FIELDS.items()))
@@ -337,6 +338,36 @@ def test_an_edited_lesson_row_is_left_as_it_is(
 
     assert list(LessonSettings.objects.values()) == before
     assert "news_podcast: the lesson settings row already exists; left as it was" in out
+
+
+@DATABASES
+def test_a_blank_lesson_cadence_in_the_seed_makes_a_row_with_no_lessons(
+    seed_dir: Path,
+) -> None:
+    values = read(seed_dir, "lesson_settings.json")
+    values["every_days"] = None
+    write(seed_dir, "lesson_settings.json", values)
+
+    seed()
+
+    assert LessonSettings.objects.get().every_days is None
+
+
+@DATABASES
+@pytest.mark.parametrize("value", ["2", 2.5, True])
+def test_a_lesson_cadence_of_the_wrong_json_type_stops_the_seed(
+    seed_dir: Path, value: Any
+) -> None:
+    values = read(seed_dir, "lesson_settings.json")
+    values["every_days"] = value
+    write(seed_dir, "lesson_settings.json", values)
+
+    with pytest.raises(
+        CommandError, match="lesson_settings.json: every_days must be a whole number"
+    ):
+        seed()
+
+    assert nothing_written()
 
 
 @DATABASES

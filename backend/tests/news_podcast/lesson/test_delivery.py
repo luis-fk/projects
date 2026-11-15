@@ -203,7 +203,8 @@ def test_send_without_the_bot_or_the_chat_fails_the_lesson(missing: str) -> None
         )
 
     with pytest.raises(
-        LessonError, match="TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não configurado"
+        LessonError,
+        match="TELEGRAM_BOT_TOKEN ou TELEGRAM_ADMIN_CHAT_ID não configurado",
     ):
         run_node(send_lesson, SENT_STATE, make_context)
     assert sent == []

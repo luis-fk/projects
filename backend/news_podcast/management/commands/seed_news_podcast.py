@@ -194,7 +194,7 @@ def catalog_rows(entries: Any) -> list[tuple[Area, list[Topic]]]:
 def check_fields(values: Any, model: type[models.Model], where: str) -> None:
     """A seed object holds every field the admin edits, each with its JSON type, and
     nothing else. Django would turn a list into its text, 12.7 minutes into 12 and
-    true into 1.0, and let null through a field that may be blank."""
+    true into 1.0, and let null through a field that may be blank but can't hold it."""
     if not isinstance(values, dict):
         raise CommandError(f"{where} isn't a JSON object")
     fields = [
@@ -216,8 +216,11 @@ def check_fields(values: Any, model: type[models.Model], where: str) -> None:
 
 def wrong_json_type(field: "models.Field[Any, Any]", value: Any) -> str | None:
     """The JSON type the field needs, when value doesn't have it. JSON's true and
-    false are bools, never numbers. The annotation is quoted because Django's Field
-    takes type arguments only in its stubs."""
+    false are bools, never numbers, and only a nullable field takes null. The
+    annotation is quoted because Django's Field takes type arguments only in its
+    stubs."""
+    if value is None and field.null:
+        return None
     if isinstance(field, models.BooleanField):
         return None if isinstance(value, bool) else "true or false"
     if isinstance(field, models.IntegerField):

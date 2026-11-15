@@ -7,7 +7,8 @@ speed, models, prices and prompts change in the Django admin (see *Settings*). T
 episode is only that voice message: each run's cost and result stay in the admin's
 history, and the sources it used, in the run's log on Railway. The `lesson` action
 makes a lesson of under 10 minutes on one topic of the course in the admin, from
-pages of trusted sites (see *Lesson graph*).
+pages of trusted sites (see *Lesson graph*). The cron makes one too, every few days
+set in *Lesson settings*, and the lessons go to your own chat with the bot.
 
 The app has its own database, `news_podcast_db` (`NEWS_PODCAST_DATABASE_URL`), with the
 settings, the feeds, the lesson catalog and the history. The rest is a management
@@ -76,31 +77,33 @@ minutes before the episode's hour (`40 21 * * *` sends around 19:00 in Brasília
 the midnight episode (cron between 23:00 and 0:00 in Brasília): it would arrive before
 midnight, already dated the next day. A run only starts if the previous one has ended.
 
-**Lessons:** with `--lesson-every-days 2` added to the Custom Start Command, a lesson
-follows the episode every 2 days. The number is whole days from 1, and a lesson is due
-once that many São Paulo days passed since the latest lesson sent, a lesson made with
-the `lesson` action included (a failed or unsent one doesn't count), so with none sent
-the first one comes on the first run. Add the option only once the release that brings
-it is on `main`, and remove it before rolling back past that release: older code
-refuses it, and the cron would then make no episode at all. The episode always goes
-first and saves its row; then the lesson reads the settings again, so ticking
-*Paused* while the episode runs stops the lesson too. Each part reports its own
-failure, a failed lesson leaves the episode as it went, and the run fails naming each
-failed part. A lesson after a failed episode still uses the stories it selected, and
-says the news didn't go out. With the lesson, a run can last up to 3.5 hours: 2 for the
-episode and 90 minutes for the lesson.
+**Lessons:** the cron's run makes a lesson after the episode when *A lesson every
+(days)* in *Lesson settings* says one is due; blank, it makes none. A lesson is due once
+that many São Paulo days passed since the latest lesson sent, a lesson made with the
+`lesson` action included (a failed or unsent one doesn't count), so with none sent the
+first one comes on the first run. Only runs with `--scheduled` make lessons: the cron's
+and *Run now*, which uses its command; a local run without it makes none. Without the
+*Lesson settings* row, each of those runs reports it. The episode always goes first and
+saves its row; then the lesson reads the settings again, so ticking *Paused* while the
+episode runs stops the lesson too. Each part reports its own failure, a failed lesson
+leaves the episode as it went, and the run fails naming each failed part. A lesson after
+a failed episode still uses the stories it selected, and says the news didn't go out.
+With the lesson, a run can last up to 3.5 hours: 2 for the episode and 90 minutes for
+the lesson.
 
 A backend deploy also redeploys this service and kills a running execution, with no
 grace period. So releases to `main` stay out of the episode's time, from 6:40 until it
 arrives, and on lesson days until the lesson arrives.
 
 To run it by hand, use the service's *Run now* or `railway cron run`. Since it is the
-cron's command, it respects the pause and reads the news up to the full hour it started
-in. Run locally without `--scheduled`, it reads the news up to the moment it starts.
+cron's command, it respects the pause, reads the news up to the full hour it started in
+and makes the lesson when one is due. Run locally without `--scheduled`, it reads the
+news up to the moment it starts.
 
 ## Sending to a group
 
-The bot only sends to the `TELEGRAM_CHAT_ID` conversation. Someone who just opens the bot
+The bot sends the episode only to the `TELEGRAM_CHAT_ID` conversation (the lessons and
+the notices go to `TELEGRAM_ADMIN_CHAT_ID`, see step 3). Someone who just opens the bot
 and sends `/start` gets nothing. For more people to listen, use a group:
 
 1. In Telegram, create a group with the people and add the bot (search for its @). If
@@ -111,9 +114,10 @@ and sends `/start` gets nothing. For more people to listen, use a group:
    in the last 24 hours, with each one's number. The group shows with 👥 and a negative
    number.
 3. Replace `TELEGRAM_CHAT_ID` with the group's number on the Railway service. From then
-   on the episode goes to the group. Error notices, including one about a send the group
-   refused, go to `TELEGRAM_ADMIN_CHAT_ID` (the number of your conversation with the
-   bot), so they don't show up in the group; without it, they go to the group too.
+   on the episode goes to the group. The lessons and the error notices, including one
+   about a send the group refused, go to `TELEGRAM_ADMIN_CHAT_ID` (the number of your
+   conversation with the bot), so they don't show up in the group; without it, they go
+   to the group too.
 
 If the group isn't in the list (Telegram only keeps the last 24 hours for the bot), send
 `/start@bot_name` in the group and run it again. If Telegram turns the group into a
@@ -128,7 +132,7 @@ the admin. Without it, a run fails at "configurações" and the Settings page sa
 run the seed. Each change applies from the next run on, and an invalid value doesn't
 save: the admin shows the error on the field.
 
-- **Paused:** Railway's runs (the cron and *Run now*) end with no episode.
+- **Paused:** Railway's runs (the cron and *Run now*) end with no episode and no lesson.
 - **Length and speed:** the length is the file's, already at the chosen speed. With
   `1.25`, the script is 25% longer to fit the same time, and the voice costs 25% more.
   The number of stories follows the length (one every minute and a half).
@@ -155,7 +159,8 @@ save: the admin shows the error on the field.
   episode comes out shorter or longer than planned.
 
 **Lesson settings** (*News podcast → Lesson settings*) are a second single row, also
-created only by the seed and shown the same way when it is missing. They hold the
+created only by the seed and shown the same way when it is missing. They hold how often
+the cron makes a lesson (*A lesson every (days)*, see *Scheduling*; blank for none), the
 lesson's minimum and maximum minutes (at least 1, and under 10: `LESSON_MINUTES_LIMIT`
 in `api/lesson/config.py`), its own voice model with its two prices, the choice, pick,
 script and review prompts, and the lesson voice style. The text models, their prices
@@ -291,9 +296,10 @@ The last nodes voice the lesson, build its file and send it (`api/lesson/deliver
 - **Audio:** `news_podcast_output/aula-YYYY-MM-DD.ogg`, at the speech speed of
   *Settings*. A lesson over 10 minutes still goes out, with a warning to lower the
   maximum minutes or recalibrate `LESSON_WORDS_PER_MINUTE`.
-- **Sending:** one voice message to `TELEGRAM_CHAT_ID`. The caption has the topic, its
-  area and a link to each page under its title, cut so the caption fits Telegram's
-  1,024 characters.
+- **Sending:** one voice message to the chat that gets the notices: your chat with the
+  bot (`TELEGRAM_ADMIN_CHAT_ID`), or `TELEGRAM_CHAT_ID` without it. The caption has the
+  topic, its area and a link to each page under its title, cut so the caption fits
+  Telegram's 1,024 characters.
 - **Failures:** the admin chat gets "Não consegui gerar a aula de hoje" with the step
   and the error; with `--no-send`, only the log does. A lesson stops after 90 minutes
   (`MAX_LESSON_MINUTES`).
@@ -343,10 +349,12 @@ The audio and the episode's selection and script JSON go to
 `backend/news_podcast_output/`, which is in `.gitignore`. The `lesson` action, which
 also needs `TAVILY_API_KEY`, reads the feeds and makes the day's selection, as the
 episode does, then makes a lesson with no episode, so the lesson never says the news
-went out. Without `--no-send` it goes to `TELEGRAM_CHAT_ID` and counts as taught. A
-*Lesson settings* row seeded before the lesson's prompts were final keeps the old
-ones: paste the prompts from `seed/lesson_settings.json` in the admin, or delete the
-row and run `make seed` again.
+went out. Without `--no-send` it goes to the chat that gets the notices (see *Sending*
+under *Lesson graph*) and counts as taught. A *Lesson settings* row seeded before the
+lesson's prompts were final keeps the old ones: paste the prompts from
+`seed/lesson_settings.json` in the admin, or delete the row and run `make seed` again.
+One seeded before *A lesson every (days)* existed has it blank, so the cron makes no
+lessons until it is set in the admin.
 
 ## Good to know
 
