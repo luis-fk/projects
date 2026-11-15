@@ -29,3 +29,14 @@ MAX_LESSON_PAGES = 3
 # pages stay near 11,000 input tokens per request.
 MIN_PAGE_CHARS = 1_000
 MAX_PAGE_CHARS = 15_000
+
+# The lesson voice's words a minute at speed 1.0, slower than the daily's
+# NATURAL_WORDS_PER_MINUTE since the lesson's style is unhurried. Recalibrate it from
+# the history's words per minute.
+LESSON_WORDS_PER_MINUTE = 150
+# Above 1.1 times the maximum, a script is asked again: at 9 minutes that is 1,485
+# words, about 9.9 minutes, so the lesson stays under 10. A short script is fine.
+LONG_SCRIPT_RATIO = 1.1
+# The review may cut and correct: more than 5% longer than the script, or past the
+# lesson's ceiling, is asked again.
+MAX_REVIEW_GROWTH = 1.05

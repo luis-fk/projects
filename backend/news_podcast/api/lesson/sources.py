@@ -22,7 +22,7 @@ from news_podcast.api.lesson.config import (
     SEARCH_RESULTS,
 )
 from news_podcast.api.lesson.messages import skipped_warning
-from news_podcast.api.lesson.prompts import lesson_date, material_template
+from news_podcast.api.lesson.prompts import lesson_date, material_template, one_line
 from news_podcast.api.lesson.schemas import (
     LessonPage,
     PagePick,
@@ -211,10 +211,6 @@ def pick_material(results: Sequence[SearchResult]) -> str:
         for number, result in enumerate(results, start=1)
     ]
     return "\n".join(lines)
-
-
-def one_line(text: str) -> str:
-    return " ".join(text.split())
 
 
 def checked_pick(results: Sequence[SearchResult]) -> Callable[[PagePick], Pick]:

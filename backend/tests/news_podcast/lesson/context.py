@@ -91,6 +91,26 @@ def found(*results: dict[str, Any]) -> dict[str, Any]:
     return {"query": "", "results": list(results)}
 
 
+def script_answer(*words: int, changes: list[str] | None = None) -> str:
+    """A script, or a reviewed one with `changes`: the hosts take turns, each turn
+    with that many words. Ten turns of 100 words when no counts are given."""
+    counts = words or (100,) * 10
+    turns = [
+        {"speaker": ("Bia", "Léo")[number % 2], "text": " ".join(["palavra"] * n)}
+        for number, n in enumerate(counts)
+    ]
+    answer: dict[str, Any] = {"turns": turns}
+    if changes is not None:
+        answer["changes"] = changes
+    return json.dumps(answer)
+
+
+def words_in(total: int, turns: int = 10) -> tuple[int, ...]:
+    """`total` words spread over `turns` turns."""
+    base, extra = divmod(total, turns)
+    return tuple(base + (1 if number < extra else 0) for number in range(turns))
+
+
 def no_network(request: httpx.Request) -> httpx.Response:
     raise AssertionError(f"unexpected request to {request.url}")
 

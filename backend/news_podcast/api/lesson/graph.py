@@ -13,6 +13,7 @@ from langgraph.runtime import Runtime
 
 from news_podcast.api.core.schemas import Usage
 from news_podcast.api.lesson.config import MAX_LESSON_MINUTES, MAX_LESSON_STEPS
+from news_podcast.api.lesson.script import review_script, write_script
 from news_podcast.api.lesson.sources import (
     after_pick,
     keep_pages,
@@ -36,6 +37,8 @@ NODES: tuple[tuple[str, str, Node], ...] = (
     ("pick_pages", "busca das fontes", pick_pages),
     ("next_topic", "busca das fontes", next_topic),
     ("keep_pages", "busca das fontes", keep_pages),
+    ("write_script", "roteiro", write_script),
+    ("review_script", "revisão", review_script),
 )
 
 
@@ -71,7 +74,9 @@ def build_graph() -> LessonGraph:
         },
     )
     graph.add_edge("next_topic", "search")
-    graph.add_edge("keep_pages", END)
+    graph.add_edge("keep_pages", "write_script")
+    graph.add_edge("write_script", "review_script")
+    graph.add_edge("review_script", END)
     return graph.compile()
 
 
