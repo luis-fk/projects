@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, tzinfo
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -10,12 +10,21 @@ import httpx
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import DatabaseError, IntegrityError, OperationalError
+from django.db import (
+    DatabaseError,
+    IntegrityError,
+    OperationalError,
+    close_old_connections,
+)
 from pytest_django import Settings
 from tavily import AsyncTavilyClient
 
 from news_podcast.api.core import telegram
-from news_podcast.api.core.config import VOICE_RETRY_MINUTES
+from news_podcast.api.core.config import (
+    MAX_RUN_MINUTES,
+    TEXT_RETRY_MINUTES,
+    VOICE_RETRY_MINUTES,
+)
 from news_podcast.api.core.llm import ModelFactory, TextModels
 from news_podcast.api.core.schemas import NewsStory, Usage
 from news_podcast.api.core.telegram import TelegramClient, TelegramError
@@ -23,15 +32,16 @@ from news_podcast.api.core.voice.base import VoiceError
 from news_podcast.api.core.voice.providers import voice_provider
 from news_podcast.api.episode import run as episode_run
 from news_podcast.api.episode.run import Selection
-from news_podcast.api.episode.schemas import NewsItem
-from news_podcast.api.episode.service import EpisodeError
+from news_podcast.api.episode.schemas import EpisodeReport, NewsItem, SelectedStory
+from news_podcast.api.episode.service import EpisodeError, EpisodeService
 from news_podcast.api.lesson import delivery, graph
 from news_podcast.api.lesson import run as lesson_run
-from news_podcast.api.lesson.graph import LessonOutcome
+from news_podcast.api.lesson.config import MAX_LESSON_MINUTES
+from news_podcast.api.lesson.graph import LessonOutcome, run_graph
 from news_podcast.api.lesson.schemas import LessonPage, TopicToTry
 from news_podcast.api.lesson.state import LessonContext, LessonState
 from news_podcast.api.lesson.topics import candidates
-from news_podcast.models import Episode, Feed, Topic
+from news_podcast.models import Episode, Feed, PodcastSettings, Topic
 from tests.news_podcast.factories import (
     LESSON_SETTINGS,
     SETTINGS,
@@ -40,6 +50,7 @@ from tests.news_podcast.factories import (
     build_settings,
     catalog_topic,
     create_area,
+    create_lesson_row,
     create_lesson_settings,
     create_settings,
     create_topic,
@@ -906,3 +917,422 @@ def test_a_client_that_fails_to_close_after_the_lesson_keeps_its_outcome(
     assert Episode.objects.get().status == Episode.Status.SENT
     assert world.sent == []
     assert "o cliente do Tavily não fechou" in caplog.text
+
+
+def clock(instant: datetime) -> type:
+    """A stand-in for run.py's datetime whose now() is `instant`."""
+
+    class Clock:
+        @staticmethod
+        def now(tz: tzinfo) -> datetime:
+            return instant.astimezone(tz)
+
+    return Clock
+
+
+# D is 2026-03-09 in São Paulo; its lesson went out at 23:30, 02:30 UTC on the 10th.
+D_EVENING = datetime(2026, 3, 10, 2, 30, tzinfo=UTC)
+# The cron's 06:40 in São Paulo on D+1 and D+2.
+D1_MORNING = datetime(2026, 3, 10, 9, 40, tzinfo=UTC)
+D2_MORNING = datetime(2026, 3, 11, 9, 40, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("last_sent_on", "every_days", "due"),
+    [
+        (None, 2, True),
+        (date(2026, 3, 9), 2, False),
+        (date(2026, 3, 8), 2, True),
+        (date(2026, 3, 7), 2, True),
+        (date(2026, 3, 10), 1, False),
+        (date(2026, 3, 9), 1, True),
+    ],
+)
+def test_a_lesson_is_due_every_n_days_after_the_last_one_sent(
+    last_sent_on: date | None, every_days: int, due: bool
+) -> None:
+    assert lesson_run.lesson_due(date(2026, 3, 10), last_sent_on, every_days) is due
+
+
+@DATABASE
+def test_the_last_lesson_sent_is_read_on_its_sao_paulo_date() -> None:
+    assert lesson_run.last_lesson_sent_on() is None
+
+    create_lesson_row(started_at=D_EVENING)
+    later = datetime(2026, 3, 12, 9, 40, tzinfo=UTC)
+    create_lesson_row(started_at=later, status=Episode.Status.FAILED)
+    create_lesson_row(started_at=later, status=Episode.Status.NOT_SENT)
+    create_lesson_row(started_at=later, kind=Episode.Kind.NEWS)
+
+    assert lesson_run.last_lesson_sent_on() == date(2026, 3, 9)
+
+
+@DATABASE
+def test_with_a_lesson_every_two_days_only_the_second_day_makes_one(
+    monkeypatch: pytest.MonkeyPatch, world: World
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    create_lesson_row(started_at=D_EVENING)
+    seen = capture_run(monkeypatch)
+
+    def run_at(instant: datetime) -> Exception | None:
+        monkeypatch.setattr(lesson_run, "datetime", clock(instant))
+        return lesson_run.make_lesson(
+            [], send=False, news_sent=True, scheduled=True, every_days=2
+        )
+
+    assert run_at(D1_MORNING) is None
+    assert seen == []
+    assert run_at(D2_MORNING) is None
+    assert len(seen) == 1
+    # Once D+2's lesson went out, a second run that day makes none.
+    create_lesson_row(started_at=D2_MORNING)
+    run_at(D2_MORNING + timedelta(hours=1))
+    assert len(seen) == 1
+    assert Episode.objects.filter(status=Episode.Status.NOT_SENT).count() == 1
+
+
+@DATABASE
+def test_a_failed_or_unsent_lesson_leaves_the_next_one_due(
+    monkeypatch: pytest.MonkeyPatch, world: World
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    yesterday = D2_MORNING - timedelta(days=1)
+    create_lesson_row(started_at=yesterday, status=Episode.Status.FAILED)
+    create_lesson_row(started_at=yesterday, status=Episode.Status.NOT_SENT)
+    seen = capture_run(monkeypatch)
+    monkeypatch.setattr(lesson_run, "datetime", clock(D2_MORNING))
+
+    lesson_run.make_lesson([], send=False, news_sent=True, scheduled=True, every_days=2)
+
+    assert len(seen) == 1
+
+
+@DATABASE
+@pytest.mark.parametrize(("scheduled", "runs"), [(True, False), (False, True)])
+def test_paused_skips_only_a_scheduled_lesson(
+    monkeypatch: pytest.MonkeyPatch, world: World, scheduled: bool, runs: bool
+) -> None:
+    create_settings(paused=True)
+    create_lesson_settings()
+    seen = capture_run(monkeypatch)
+
+    error = lesson_run.make_lesson(
+        [], send=True, news_sent=True, scheduled=scheduled, every_days=2
+    )
+
+    assert error is None
+    assert len(seen) == int(runs)
+    assert Episode.objects.count() == int(runs)
+    assert world.sent == []
+
+
+@DATABASE
+def test_a_failed_read_of_the_last_lesson_is_reported_with_no_row(
+    monkeypatch: pytest.MonkeyPatch, world: World
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    seen = capture_run(monkeypatch)
+
+    def broken() -> date | None:
+        raise DatabaseError("a conexão caiu")
+
+    monkeypatch.setattr(lesson_run, "last_lesson_sent_on", broken)
+
+    error = lesson_run.make_lesson(
+        [], send=True, news_sent=True, scheduled=True, every_days=2
+    )
+
+    assert str(error) == "a conexão caiu"
+    assert seen == []
+    assert not Episode.objects.exists()
+    [(chat, text)] = world.messages()
+    assert chat == "admin"
+    assert "<b>Etapa:</b> configurações" in text
+
+
+SELECTED_STORIES = [
+    SelectedStory(
+        title=story.title,
+        category="politica",
+        angle=story.angle,
+        item_ids=[str(number)],
+    )
+    for number, story in enumerate(STORIES, start=1)
+]
+
+
+def episode_ends(
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    tmp_path: Path,
+    failure: Exception | None = None,
+    selected: bool = True,
+    seen: list[TextModels] | None = None,
+) -> None:
+    """The news episode, its steps faked inside its real run: the selection's
+    stories, unless it fails before them, then its voice note or its failure. It
+    sends through the world's Telegram, and `seen` gets its TextModels."""
+
+    async def generate(service: EpisodeService, *_when: object) -> EpisodeReport:
+        if seen is not None:
+            seen.append(service.text)
+        if selected:
+            service.stories = SELECTED_STORIES
+        if failure:
+            raise failure
+        return EpisodeReport(
+            audio_path=tmp_path / "resumo.ogg",
+            duration_seconds=900.0,
+            caption="🎙️ Resumo das 7",
+            script_words=2550,
+        )
+
+    monkeypatch.setattr(EpisodeService, "_generate", generate)
+    monkeypatch.setattr(episode_run, "telegram_client", world.telegram)
+
+
+def kinds_and_statuses() -> list[tuple[str, str]]:
+    return [(row.kind, row.status) for row in Episode.objects.order_by("pk")]
+
+
+NEWS, LESSON = Episode.Kind.NEWS, Episode.Kind.LESSON
+
+
+@DATABASE
+def test_a_due_lesson_follows_the_sent_news_and_saves_its_row_after(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    create_catalog()
+    world.responses.append(found(*PAGES))
+    episode_ends(monkeypatch, world, tmp_path)
+    built: dict[str, FakeChatModel] = {}
+    lesson_over(monkeypatch, fake_factory({MODEL: list(LESSON_ANSWERS)}, [], built))
+
+    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+
+    sent = Episode.Status.SENT
+    assert kinds_and_statuses() == [(NEWS, sent), (LESSON, sent)]
+    assert [entry[2] for entry in world.sent][0] == "🎙️ Resumo das 7"
+    assert world.sent[1][2].startswith("🎓 <b>Aula · ")
+    script_request = built[MODEL].received[2]
+    assert "Resumo enviado: sim." in str(script_request[0].content)
+
+
+@DATABASE
+def test_without_sending_both_rows_are_not_sent_and_nothing_goes_out(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    create_catalog()
+    world.responses.append(found(*PAGES))
+    episode_ends(monkeypatch, world, tmp_path)
+    lesson_over(monkeypatch, LESSON_ANSWERS)
+
+    call_command(
+        "news_podcast",
+        "episode",
+        "--scheduled",
+        "--lesson-every-days",
+        "2",
+        "--no-send",
+    )
+
+    not_sent = Episode.Status.NOT_SENT
+    assert kinds_and_statuses() == [(NEWS, not_sent), (LESSON, not_sent)]
+    assert world.sent == []
+
+
+@DATABASE
+def test_both_failures_are_saved_reported_once_each_and_named(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    create_catalog()
+    world.responses.append(found(*PAGES))
+    world.voice_outcomes.append(VoiceError("a voz da aula caiu"))
+    episode_ends(monkeypatch, world, tmp_path, EpisodeError("a voz caiu"))
+    built: dict[str, FakeChatModel] = {}
+    lesson_over(monkeypatch, fake_factory({MODEL: list(LESSON_ANSWERS)}, [], built))
+
+    with pytest.raises(CommandError) as raised:
+        call_command(
+            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
+        )
+
+    assert str(raised.value) == "episódio: a voz caiu; aula: a voz da aula caiu"
+    failed = Episode.Status.FAILED
+    assert kinds_and_statuses() == [(NEWS, failed), (LESSON, failed)]
+    news = Episode.objects.get(kind=NEWS)
+    assert news.error == "início: a voz caiu"
+    notices = [text.split("\n")[0] for _, text in world.messages()]
+    assert notices == [
+        "⚠️ Não consegui gerar o episódio de hoje.",
+        "⚠️ Não consegui gerar a aula de hoje.",
+    ]
+    # The stories the failed episode selected, and no news sent.
+    choice_request = str(built[MODEL].received[0][1].content)
+    assert all(story.title in choice_request for story in STORIES)
+    script_request = built[MODEL].received[2]
+    assert "Resumo enviado: não." in str(script_request[0].content)
+
+
+@DATABASE
+def test_an_episode_that_fails_before_its_selection_leaves_the_course_order(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    catalog = create_catalog()
+    world.responses.append(found(*PAGES))
+    failure = EpisodeError("Nenhuma notícia encontrada nos feeds")
+    episode_ends(monkeypatch, world, tmp_path, failure, selected=False)
+    # No stories, so no choice is asked.
+    lesson_over(monkeypatch, LESSON_ANSWERS[1:])
+
+    with pytest.raises(CommandError, match="^episódio: Nenhuma notícia"):
+        call_command(
+            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
+        )
+
+    lesson = Episode.objects.get(kind=LESSON)
+    assert (lesson.status, lesson.topic) == (Episode.Status.SENT, catalog["veto"])
+    assert lesson.story_title == ""
+
+
+@DATABASE
+def test_a_failed_episode_and_no_lesson_settings_name_both_parts(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    episode_ends(monkeypatch, world, tmp_path, EpisodeError("a voz caiu"))
+    lesson_over(monkeypatch, [])
+
+    with pytest.raises(CommandError) as raised:
+        call_command(
+            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
+        )
+
+    assert str(raised.value).startswith(
+        "episódio: a voz caiu; aula: Não há configurações da aula no banco"
+    )
+    assert kinds_and_statuses() == [(NEWS, Episode.Status.FAILED)]
+    notices = [text for _, text in world.messages()]
+    assert len(notices) == 2
+    assert "Não consegui gerar a aula de hoje" in notices[1]
+    assert "<b>Etapa:</b> configurações" in notices[1]
+
+
+@DATABASE
+def test_paused_while_the_news_runs_stops_the_lesson(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    row = create_settings()
+    create_lesson_settings()
+    create_catalog()
+    episode_ends(monkeypatch, world, tmp_path)
+    lesson_over(monkeypatch, LESSON_ANSWERS)
+
+    def tick_paused() -> None:
+        # The owner ticks paused in the admin while the episode runs.
+        close_old_connections()
+        PodcastSettings.objects.filter(pk=row.pk).update(paused=True)
+
+    monkeypatch.setattr(episode_run, "close_old_connections", tick_paused)
+
+    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+
+    assert kinds_and_statuses() == [(NEWS, Episode.Status.SENT)]
+    assert len(world.sent) == 1
+
+
+@DATABASE
+def test_paused_at_the_start_runs_neither_part(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings(paused=True)
+    create_lesson_settings()
+    episode_ends(monkeypatch, world, tmp_path)
+    lesson_over(monkeypatch, [])
+
+    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+
+    assert not Episode.objects.exists()
+    assert world.sent == []
+
+
+@DATABASE
+def test_a_news_settings_failure_is_reported_once_with_no_lesson(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_lesson_settings()
+    episode_ends(monkeypatch, world, tmp_path)
+    lesson_over(monkeypatch, [])
+
+    with pytest.raises(CommandError, match="seed_news_podcast"):
+        call_command(
+            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
+        )
+
+    assert not Episode.objects.exists()
+    [(chat, text)] = world.messages()
+    assert chat == "admin"
+    assert "Não consegui gerar o episódio de hoje" in text
+
+
+@DATABASE
+def test_the_lesson_starts_with_fresh_text_models_and_its_own_limit(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    create_catalog()
+    world.responses.append(found(*PAGES))
+    episode_texts: list[TextModels] = []
+    episode_ends(monkeypatch, world, tmp_path, seen=episode_texts)
+    lesson_over(monkeypatch, LESSON_ANSWERS)
+    lesson_texts: list[TextModels] = []
+
+    async def spent_then_run(
+        inputs: LessonState, context: LessonContext
+    ) -> LessonOutcome:
+        lesson_texts.append(context.text)
+        return await run_graph(inputs, context)
+
+    def spent(texts: list[TextModels]) -> None:
+        # The episode used its waits and marked its model out of quota.
+        texts[0].retry_minutes.clear()
+        texts[0].dropped.add(SETTINGS["text_model"])
+
+    monkeypatch.setattr(lesson_run, "run_graph", spent_then_run)
+    limits: list[float] = []
+    timeout = asyncio.timeout
+
+    def recorded(delay: float | None) -> asyncio.Timeout:
+        if delay is not None:
+            limits.append(delay)
+        return timeout(delay)
+
+    monkeypatch.setattr(asyncio, "timeout", recorded)
+
+    def after_the_episode() -> None:
+        spent(episode_texts)
+        close_old_connections()
+
+    monkeypatch.setattr(episode_run, "close_old_connections", after_the_episode)
+
+    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+
+    [lesson_text] = lesson_texts
+    assert lesson_text is not episode_texts[0]
+    assert lesson_text.retry_minutes == list(TEXT_RETRY_MINUTES)
+    assert lesson_text.dropped == set()
+    assert limits == [MAX_RUN_MINUTES * 60, MAX_LESSON_MINUTES * 60]
+    assert Episode.objects.get(kind=LESSON).status == Episode.Status.SENT

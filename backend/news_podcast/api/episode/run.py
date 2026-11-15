@@ -23,7 +23,12 @@ from news_podcast.api.episode.config import (
 from news_podcast.api.episode.feeds import fetch_items
 from news_podcast.api.episode.messages import FAILURE_SUBJECT
 from news_podcast.api.episode.options import news_window
-from news_podcast.api.episode.schemas import EpisodeReport, EpisodeSettings, FeedSource
+from news_podcast.api.episode.schemas import (
+    EpisodeReport,
+    EpisodeSettings,
+    FeedSource,
+    SelectedStory,
+)
 from news_podcast.api.episode.selection import select_stories
 from news_podcast.api.episode.service import EpisodeError, EpisodeService
 from news_podcast.models import Episode, Feed, PodcastSettings, SettingsMissing
@@ -33,12 +38,24 @@ logger = logging.getLogger(__name__)
 
 class Run(NamedTuple):
     """What a run left for the history: the report or the error, the step it was
-    in and the answers it paid for, text and voice."""
+    in, the answers it paid for, text and voice, and the stories it selected."""
 
     report: EpisodeReport | None
     error: Exception | None
     step: str
     usages: list[Usage]
+    stories: list[NewsStory]
+
+
+class EpisodeOutcome(NamedTuple):
+    """How the episode ended, for the lesson that may follow it: paused (with no
+    row), sent, the day's stories (none when it failed before the selection) and
+    its error."""
+
+    paused: bool
+    sent: bool
+    stories: list[NewsStory]
+    error: Exception | None
 
 
 class Selection(NamedTuple):
@@ -63,10 +80,11 @@ def episode_settings(podcast_settings: PodcastSettings) -> EpisodeSettings:
     )
 
 
-def make_episode(*, scheduled: bool, send: bool) -> None:
+def make_episode(*, scheduled: bool, send: bool) -> EpisodeOutcome:
     """Makes the episode with the settings from the admin and saves the run in the
-    history, failed or not. The database is only used here, outside the event loop,
-    where Django's ORM can run."""
+    history, failed or not, and returns how it ended; a failure was already
+    reported. Only a settings failure raises, so no lesson follows it. The database
+    is only used here, outside the event loop, where Django's ORM can run."""
     try:
         podcast_settings = PodcastSettings.load()
         sources = Feed.sources()
@@ -76,7 +94,7 @@ def make_episode(*, scheduled: bool, send: bool) -> None:
         raise
     if scheduled and podcast_settings.paused:
         logger.info("The podcast is paused in the admin, so there is no episode")
-        return
+        return EpisodeOutcome(paused=True, sent=False, stories=[], error=None)
 
     snapshot = episode_settings(podcast_settings)
     started_at = timezone.now()
@@ -98,8 +116,12 @@ def make_episode(*, scheduled: bool, send: bool) -> None:
         usage=[usage.model_dump() for usage in run.usages],
         error=f"{run.step}: {run.error}" if run.error else "",
     )
-    if run.error:
-        raise run.error
+    return EpisodeOutcome(
+        paused=False,
+        sent=status == Episode.Status.SENT,
+        stories=run.stories,
+        error=run.error,
+    )
 
 
 async def generate(
@@ -121,8 +143,15 @@ async def generate(
         try:
             report = await service.generate_episode(scheduled=scheduled, send=send)
         except Exception as error:
-            return Run(None, error, service.step, service.usages)
-        return Run(report, None, service.step, service.usages)
+            stories = news_stories(service.stories)
+            return Run(None, error, service.step, service.usages, stories)
+        stories = news_stories(service.stories)
+        return Run(report, None, service.step, service.usages, stories)
+
+
+def news_stories(stories: list[SelectedStory]) -> list[NewsStory]:
+    """The selected stories as the lesson reads them, in their order."""
+    return [NewsStory(story.title, story.category, story.angle) for story in stories]
 
 
 def select_today(*, model_factory: ModelFactory = chat_model) -> Selection:
@@ -155,4 +184,4 @@ async def select(
         if not items:
             raise EpisodeError("Nenhuma notícia encontrada nos feeds")
         stories = await select_stories(text, snapshot, items, start, end)
-    return [NewsStory(story.title, story.category, story.angle) for story in stories]
+    return news_stories(stories)

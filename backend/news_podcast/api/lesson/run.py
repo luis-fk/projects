@@ -6,12 +6,13 @@ import logging
 import tempfile
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import httpx
 from django.conf import settings
 from django.db import DatabaseError, IntegrityError, close_old_connections
+from django.db.models import Max
 from django.utils import timezone
 from tavily import AsyncTavilyClient
 
@@ -62,22 +63,50 @@ def lesson_options(
     )
 
 
+def lesson_due(today: date, last_sent_on: date | None, every_days: int) -> bool:
+    """The first lesson is due at once, and the next one every_days São Paulo days
+    after the latest one sent."""
+    return last_sent_on is None or (today - last_sent_on).days >= every_days
+
+
+def last_lesson_sent_on() -> date | None:
+    """The São Paulo date of the latest lesson sent: a failed or unsent one doesn't
+    count."""
+    latest = Episode.objects.filter(
+        kind=Episode.Kind.LESSON, status=Episode.Status.SENT
+    ).aggregate(latest=Max("started_at"))["latest"]
+    return latest.astimezone(LOCAL_TZ).date() if latest else None
+
+
 def make_lesson(
     stories: Sequence[NewsStory],
     *,
     send: bool,
     news_sent: bool,
+    scheduled: bool = False,
+    every_days: int | None = None,
     usages: Sequence[Usage] = (),
     model_factory: ModelFactory = chat_model,
 ) -> Exception | None:
     """Makes the lesson and saves it in the history, failed or not, and returns its
-    error, which was already reported. `usages` are answers paid for before the
-    lesson that belong to its row, such as the day's selection."""
+    error, which was already reported. A scheduled run skips it while the podcast
+    is paused, and with `every_days` it runs only when due, both with no row.
+    `usages` are answers paid for before the lesson that belong to its row, such as
+    the day's selection."""
+    today = datetime.now(LOCAL_TZ).date()
     # A news episode may have run for up to 2 hours before this, and Django only
     # renews connections between requests.
     close_old_connections()
     try:
         podcast_settings = PodcastSettings.load()
+        if scheduled and podcast_settings.paused:
+            logger.info("The podcast is paused in the admin, so there is no lesson")
+            return None
+        if every_days is not None and not lesson_due(
+            today, last_lesson_sent_on(), every_days
+        ):
+            logger.info(f"No lesson today: one goes every {every_days} days")
+            return None
         lesson_settings = LessonSettings.load()
         catalog = Topic.catalog()
     except (DatabaseError, SettingsMissing) as error:
@@ -100,6 +129,7 @@ def make_lesson(
                 lesson_options(podcast_settings, lesson_settings),
                 catalog,
                 progress,
+                today=today,
                 text_models=podcast_settings.text_models(),
                 model_factory=model_factory,
             )
@@ -131,6 +161,7 @@ async def run_lesson(
     catalog: Sequence[CatalogTopic],
     progress: LessonProgress,
     *,
+    today: date,
     text_models: Sequence[str],
     model_factory: ModelFactory,
 ) -> LessonOutcome:
@@ -147,7 +178,7 @@ async def run_lesson(
                 context = LessonContext(
                     options=options,
                     catalog=tuple(catalog),
-                    today=datetime.now(LOCAL_TZ).date(),
+                    today=today,
                     text=TextModels(
                         text_models, progress.usages, http_client, model_factory
                     ),
