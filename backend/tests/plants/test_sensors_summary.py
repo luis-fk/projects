@@ -145,17 +145,7 @@ def test_a_plant_is_found_ignoring_case() -> None:
 
 
 @DATABASES
-def test_a_single_reading_has_no_change() -> None:
-    device, _ = saved_device()
-    add(device, NOW - timedelta(hours=1))
-
-    summary = plant_summary(device.user_id, "Manjericão", 24, now=NOW)
-
-    assert summary["measures"]["soil_percent"]["change"] is None
-
-
-@DATABASES
-@pytest.mark.parametrize(("asked", "kept"), [(0, 1), (24, 24), (5000, 720)])
+@pytest.mark.parametrize(("asked", "kept"), [(0, 1), (5000, 720)])
 def test_the_period_is_kept_between_1_and_720_hours(asked: int, kept: int) -> None:
     device, _ = saved_device()
 

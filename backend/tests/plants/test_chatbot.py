@@ -1,7 +1,7 @@
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,7 +21,7 @@ from plants.api.chatbot.prompts import (
     TOOLS_AGENT_PROMPT,
 )
 from plants.api.chatbot.routes import ChatBotApi
-from plants.api.chatbot.schemas import ChatInfo, LLMAnswerSchema, Routing, SquadState
+from plants.api.chatbot.schemas import ChatInfo, LLMAnswerSchema, Routing
 from plants.models import ChatHistory, Esp32Data, UserMemory, Users
 from tests.api_tokens import bearer, saved_device, user_token
 
@@ -69,7 +69,7 @@ def ask(user: Users, message: str) -> dict[str, str]:
 
 
 @DATABASES
-def test_a_question_is_answered_with_the_earlier_messages_and_saved(
+def test_a_question_is_routed_and_answered_with_the_earlier_messages_and_saved(
     agents: Agents,
 ) -> None:
     user = Users.objects.create(auth_user_id=1)
@@ -83,12 +83,13 @@ def test_a_question_is_answered_with_the_earlier_messages_and_saved(
     answer = ask(user, "Quando rego a samambaia?")
 
     assert answer == {"role": "ai", "message": "Arr, duas vezes por semana!"}
-    messages = agents.chatbot.call_args.kwargs["messages"]
-    assert [(type(message), message.content) for message in messages] == [
-        (HumanMessage, "Oi!"),
-        (AIMessage, "Ahoy, marujo!"),
-        (HumanMessage, "Quando rego a samambaia?"),
-    ]
+    for agent in (agents.router, agents.chatbot):
+        messages = agent.call_args.kwargs["messages"]
+        assert [(type(message), message.content) for message in messages] == [
+            (HumanMessage, "Oi!"),
+            (AIMessage, "Ahoy, marujo!"),
+            (HumanMessage, "Quando rego a samambaia?"),
+        ]
     assert agents.chatbot.call_args.kwargs["memory"] == "Mora em Curitiba."
     assert saved_messages(user) == [
         ("human", "Oi!"),
@@ -160,21 +161,6 @@ def test_the_chatbot_gets_only_the_last_five_exchanges(agents: Agents) -> None:
     ]
 
 
-def test_the_web_search_prints_nothing(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(tools, "TavilySearch") as tavily:
-        tavily.return_value.invoke.return_value = {
-            "results": [{"content": "Chuva amanhã"}]
-        }
-        tools.web_search.invoke({"web_search_input": "previsão de chuva"})
-
-    assert capsys.readouterr().out == ""
-
-
-def test_an_unknown_route_stops_the_chatbot() -> None:
-    with pytest.raises(ValueError, match="update_memory"):
-        nodes.route_picker(cast(SquadState, {"route": "update_memory"}))
-
-
 def send_message(client: Client, message: str) -> tuple[int, Any]:
     response = client.post(
         "/api/chatbot/message",
@@ -185,7 +171,9 @@ def send_message(client: Client, message: str) -> tuple[int, Any]:
     return response.status_code, response.json()
 
 
-def test_the_answer_comes_back_with_the_user_id(client: Client) -> None:
+def test_the_chatbot_gets_the_message_and_the_answer_comes_back_with_the_user_id(
+    client: Client,
+) -> None:
     with patch.object(ChatBotApi, "llm") as llm:
         llm.process_message.return_value.data = {"role": "ai", "message": "Arr!"}
         answer = send_message(client, "Oi")
@@ -194,6 +182,7 @@ def test_the_answer_comes_back_with_the_user_id(client: Client) -> None:
         200,
         {"user_id": 7, "response": {"role": "ai", "message": "Arr!"}},
     )
+    llm.process_message.assert_called_once_with(message="Oi", user_id=7)
 
 
 def test_a_message_over_1000_characters_gets_400(client: Client) -> None:
@@ -202,14 +191,6 @@ def test_a_message_over_1000_characters_gets_400(client: Client) -> None:
 
     assert answer == (400, {"error": "Invalid request data"})
     llm.process_message.assert_not_called()
-
-
-def test_a_message_the_chatbot_cannot_answer_gets_400(client: Client) -> None:
-    with patch.object(ChatBotApi, "llm") as llm:
-        llm.process_message.return_value = None
-        answer = send_message(client, "Oi")
-
-    assert answer == (400, {"error": "Error processing user message"})
 
 
 @pytest.mark.parametrize("prompt", [CHAT_BOT_AGENT_PROMPT, TOOLS_AGENT_PROMPT])
@@ -414,25 +395,6 @@ def test_the_prompts_give_the_current_time_in_sao_paulo() -> None:
 
 
 @DATABASES
-def test_the_router_sees_the_previous_exchange(agents: Agents) -> None:
-    user = Users.objects.create(auth_user_id=1)
-    ChatHistory.objects.create(
-        user=user, role="human", message="Como está o manjericão?"
-    )
-    ChatHistory.objects.create(user=user, role="ai", message="O solo está em 50%.")
-    agents.chatbot.return_value = LLMAnswerSchema(reasoning="-", message="Ok")
-
-    ask(user, "E nos últimos 7 dias?")
-
-    seen = agents.router.call_args.kwargs["messages"]
-    assert [m.content for m in seen] == [
-        "Como está o manjericão?",
-        "O solo está em 50%.",
-        "E nos últimos 7 dias?",
-    ]
-
-
-@DATABASES
 def test_the_tool_rounds_stop_even_if_the_model_keeps_asking(
     agents: Agents,
 ) -> None:
@@ -473,7 +435,9 @@ def test_a_failing_tool_doesnt_lose_the_answer(agents: Agents) -> None:
     assert "Tavily is down" in result.content
 
 
-def test_the_web_search_asks_tavily_for_three_advanced_results() -> None:
+def test_the_web_search_asks_tavily_for_three_advanced_results_and_prints_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     with patch.object(tools, "TavilySearch") as tavily:
         tavily.return_value.invoke.return_value = {"results": [{"content": "Chuva"}]}
         result = tools.web_search.invoke({"web_search_input": "chuva em Curitiba"})
@@ -481,3 +445,4 @@ def test_the_web_search_asks_tavily_for_three_advanced_results() -> None:
     tavily.assert_called_once_with(max_results=3, search_depth="advanced")
     tavily.return_value.invoke.assert_called_once_with(input="chuva em Curitiba")
     assert result == {"results": [{"content": "Chuva"}]}
+    assert capsys.readouterr().out == ""

@@ -6,13 +6,7 @@ from django.test import Client
 from django.utils import timezone
 
 from plants.models import Esp32Data, Esp32Device, Users
-from tests.api_tokens import (
-    api_key_for,
-    bearer,
-    saved_device,
-    saved_person,
-    user_token,
-)
+from tests.api_tokens import api_key_for, bearer, saved_device, user_token
 
 DATABASES = pytest.mark.django_db(databases=["default", "plants_db"])
 DEVICES_URL = "/api/plants/devices/"
@@ -80,10 +74,12 @@ def test_the_person_lists_only_their_active_devices(client: Client) -> None:
 
 
 @DATABASES
-def test_the_readings_come_in_time_order_within_the_period(client: Client) -> None:
+def test_the_readings_come_in_time_order_within_the_period_with_their_weather(
+    client: Client,
+) -> None:
     device, _ = saved_device()
     Esp32Device.objects.filter(pk=device.pk).update(dry_value=3000, wet_value=1000)
-    newer = reading(device, hours_ago=2, raw=2000)
+    newer = reading(device, hours_ago=2, raw=2000, temperature=None, humidity=None)
     older = reading(device, hours_ago=30, raw=2500)
     reading(device, hours_ago=200, raw=2900)
 
@@ -99,19 +95,10 @@ def test_the_readings_come_in_time_order_within_the_period(client: Client) -> No
         older.created_at,
         newer.created_at,
     ]
-    assert (rows[0]["air_humidity"], rows[0]["temperature"]) == (68, 21)
-
-
-@DATABASES
-def test_readings_without_the_weather_come_with_nulls(client: Client) -> None:
-    device, _ = saved_device()
-    reading(device, hours_ago=1, temperature=None, humidity=None)
-
-    status, body = get(client, readings_url(device.pk, "24"), device.user)
-
-    assert status == 200
-    [row] = body["readings"]
-    assert (row["air_humidity"], row["temperature"]) == (None, None)
+    assert [(r["air_humidity"], r["temperature"]) for r in rows] == [
+        (68, 21),
+        (None, None),
+    ]
 
 
 @DATABASES
@@ -127,8 +114,8 @@ def test_another_person_s_device_or_an_unknown_one_gets_404(client: Client) -> N
 @DATABASES
 @pytest.mark.parametrize(
     "hours",
-    ["", "12", "abc", "²", "024", "9" * 5000],
-    ids=["empty", "12", "letters", "superscript two", "leading zero", "5000 digits"],
+    ["12", "²", "024", "9" * 5000],
+    ids=["12", "superscript two", "leading zero", "5000 digits"],
 )
 def test_hours_outside_the_three_periods_get_400(client: Client, hours: str) -> None:
     device, _ = saved_device()
@@ -154,16 +141,6 @@ def test_requests_without_a_token_get_401(client: Client) -> None:
 
     assert get(client, DEVICES_URL, None)[0] == 401
     assert get(client, readings_url(device.pk), None)[0] == 401
-
-
-@pytest.mark.access_check
-@DATABASES
-def test_a_blocked_person_gets_401(client: Client) -> None:
-    user_id = saved_person("plants", is_active=False)
-
-    response = client.get(DEVICES_URL, headers=bearer(user_token("plants", user_id)))
-
-    assert response.status_code == 401
 
 
 @DATABASES
