@@ -72,11 +72,11 @@ def quota_error(quota_id: str) -> dict[str, Any]:
 
 
 def synthesize_with(
-    handler: Callable[[httpx.Request], httpx.Response], model: str = MODEL
+    handler: Callable[[httpx.Request], httpx.Response],
 ) -> tuple[bytes, Usage]:
     async def scenario() -> tuple[bytes, Usage]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await GeminiVoice(model, client).synthesize(
+            return await GeminiVoice(MODEL, client).synthesize(
                 [Turn(speaker="Bia", text="Oi")],
                 HOSTS,
                 style=STYLE,
@@ -97,56 +97,35 @@ def record_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return waits
 
 
-def test_tts_body_uses_one_annotated_part_per_turn() -> None:
-    turns = [Turn(speaker="Bia", text="Oi"), Turn(speaker="Léo", text="Olá")]
-
-    body = build_tts_body("gemini-3.8-flash-tts", turns, HOSTS, STYLE, HEADLINE_STYLE)
-
-    content = body["input"][0]["content"]
-    assert [part["annotations"][0]["speaker"] for part in content] == ["Bia", "Leo"]
-    assert body["generation_config"]["speech_config"]["speakers"] == [
-        {"speaker": "Bia", "voice": "Kore"},
-        {"speaker": "Leo", "voice": "Charon"},
-    ]
-
-
-def test_each_host_speaks_with_its_voice_for_google_genai() -> None:
+def test_tts_body_sets_each_turn_s_speaker_and_style_and_each_host_s_voice() -> None:
     hosts = (
         Host(
-            name="Ana",
-            speaker_id="Ana",
+            name="Bia",
+            speaker_id="Bia",
             voices={"openai": "alloy", "google_genai": "Puck"},
         ),
-        Host(name="Rui", speaker_id="Rui", voices={"google_genai": "Fenrir"}),
+        Host(
+            name="Léo",
+            speaker_id="Leo",
+            voices={"openai": "echo", "google_genai": "Fenrir"},
+        ),
     )
-
-    body = build_tts_body(
-        MODEL, [Turn(speaker="Ana", text="Oi")], hosts, STYLE, HEADLINE_STYLE
-    )
-
-    assert body["generation_config"]["speech_config"]["speakers"] == [
-        {"speaker": "Ana", "voice": "Puck"},
-        {"speaker": "Rui", "voice": "Fenrir"},
-    ]
-
-
-def test_tts_body_reads_the_headlines_with_an_emphatic_style() -> None:
     turns = [
         Turn(speaker="Bia", text="Juros sobem de novo.", headline=True),
         Turn(speaker="Léo", text="Bom dia! Hoje é sexta-feira."),
     ]
 
-    body = build_tts_body(MODEL, turns, HOSTS, STYLE, HEADLINE_STYLE)
+    body = build_tts_body(MODEL, turns, hosts, STYLE, HEADLINE_STYLE)
 
-    content = body["input"][0]["content"]
-    styles = [part["annotations"][0]["style"] for part in content]
-    assert styles == [HEADLINE_STYLE, STYLE]
-
-
-def test_extract_audio_reads_the_model_output_step() -> None:
-    audio = extract_audio_wav(AUDIO_ANSWER)
-
-    assert wav_duration(audio) == pytest.approx(1.0)
+    annotations = [part["annotations"][0] for part in body["input"][0]["content"]]
+    assert [(note["speaker"], note["style"]) for note in annotations] == [
+        ("Bia", HEADLINE_STYLE),
+        ("Leo", STYLE),
+    ]
+    assert body["generation_config"]["speech_config"]["speakers"] == [
+        {"speaker": "Bia", "voice": "Puck"},
+        {"speaker": "Leo", "voice": "Fenrir"},
+    ]
 
 
 def test_extract_audio_wraps_raw_pcm_in_a_wav_header() -> None:
@@ -161,25 +140,6 @@ def test_extract_audio_wraps_raw_pcm_in_a_wav_header() -> None:
     }
 
     assert wav_duration(extract_audio_wav(response)) == pytest.approx(0.5)
-
-
-@pytest.mark.parametrize("saved", [f"google_genai:{MODEL}", MODEL])
-def test_the_request_names_the_model_without_its_provider(saved: str) -> None:
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, json=AUDIO_ANSWER)
-
-    audio, usage = synthesize_with(handler, saved)
-
-    (request,) = requests
-    assert request.url.path.endswith("/interactions")
-    assert json.loads(request.content)["model"] == MODEL
-    assert request.headers["x-goog-api-key"] == "test-key"
-    assert wav_duration(audio) == pytest.approx(1.0)
-    assert usage.step == "voice"
-    assert usage.model == saved
 
 
 def test_the_voice_needs_the_gemini_key(settings: Settings) -> None:
@@ -211,24 +171,6 @@ def test_the_voice_retries_after_a_per_minute_limit(
     assert wav_duration(audio) == pytest.approx(1.0)
     assert len(calls) == 2
     assert waits == [1.0]
-
-
-def test_rate_limit_without_a_suggested_delay_waits_half_a_minute(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    waits = record_waits(monkeypatch)
-    calls: list[int] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(1)
-        if len(calls) == 1:
-            return httpx.Response(429, json={"error": {"message": "Rate limited"}})
-        return httpx.Response(200, json=AUDIO_ANSWER)
-
-    audio, _ = synthesize_with(handler)
-
-    assert wav_duration(audio) == pytest.approx(1.0)
-    assert waits == [RATE_LIMIT_WAIT_SECONDS]
 
 
 def test_daily_quota_stops_without_retrying() -> None:

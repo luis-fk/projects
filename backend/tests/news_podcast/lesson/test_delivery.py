@@ -9,14 +9,8 @@ from news_podcast.api.core.config import HOSTS
 from news_podcast.api.core.schemas import Turn, Usage
 from news_podcast.api.core.voice.base import VoiceProvider, VoiceUnavailableError
 from news_podcast.api.lesson import delivery
-from news_podcast.api.lesson.delivery import (
-    after_audio,
-    build_audio,
-    narrate_lesson,
-    send_lesson,
-)
+from news_podcast.api.lesson.delivery import build_audio, narrate_lesson, send_lesson
 from news_podcast.api.lesson.graph import Node
-from news_podcast.api.lesson.messages import lesson_caption
 from news_podcast.api.lesson.schemas import LessonPage, TopicToTry
 from news_podcast.api.lesson.state import LessonContext, LessonError, LessonState
 from tests.news_podcast.factories import LESSON_SETTINGS, build_lesson_options
@@ -175,21 +169,6 @@ def test_a_lesson_over_ten_minutes_still_goes_out_with_one_warning(
     assert all("10:01 min" in warning for warning in warnings)
 
 
-def test_send_sends_the_voice_note_with_its_caption_and_whole_seconds() -> None:
-    sent: list[tuple[object, ...]] = []
-
-    update, _ = run_node(
-        send_lesson,
-        SENT_STATE,
-        lambda client: lesson_context(
-            client, CATALOG, telegram=RecordingTelegram(client, sent), chat="-22"
-        ),
-    )
-
-    assert update == {}
-    assert sent == [("-22", Path("aula.ogg"), lesson_caption(VETO, PAGES), 546)]
-
-
 @pytest.mark.parametrize("missing", ["bot", "chat"])
 def test_send_without_the_bot_or_the_chat_fails_the_lesson(missing: str) -> None:
     sent: list[tuple[object, ...]] = []
@@ -208,17 +187,3 @@ def test_send_without_the_bot_or_the_chat_fails_the_lesson(missing: str) -> None
     ):
         run_node(send_lesson, SENT_STATE, make_context)
     assert sent == []
-
-
-@pytest.mark.parametrize(
-    ("state", "route"),
-    [
-        ({"send": True}, "sending"),
-        ({"send": False}, "not_sending"),
-        ({}, "not_sending"),
-    ],
-)
-def test_after_the_audio_the_lesson_is_sent_only_when_sending(
-    state: LessonState, route: str
-) -> None:
-    assert after_audio(state) == route

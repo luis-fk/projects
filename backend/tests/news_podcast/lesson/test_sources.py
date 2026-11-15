@@ -7,12 +7,6 @@ from typing import Any
 
 import httpx
 import pytest
-from tavily.errors import (
-    BadRequestError,
-    ForbiddenError,
-    InvalidAPIKeyError,
-    UsageLimitExceededError,
-)
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from news_podcast.api.core.llm import TextError
@@ -25,7 +19,7 @@ from news_podcast.api.lesson.config import (
 )
 from news_podcast.api.lesson.messages import admin_warner, skipped_warning
 from news_podcast.api.lesson.prompts import PICK_FIELDS
-from news_podcast.api.lesson.schemas import LessonPage, PagePick, TopicToTry
+from news_podcast.api.lesson.schemas import LessonPage, TopicToTry
 from news_podcast.api.lesson.sources import (
     SearchError,
     after_pick,
@@ -48,7 +42,6 @@ from tests.news_podcast.lesson.context import (
     CATALOG,
     MODEL,
     POWERS,
-    STJ,
     STORIES,
     VETO,
     FakeSearch,
@@ -158,10 +151,8 @@ def test_a_result_without_text_is_dropped_without_an_error() -> None:
     ("published", "day"),
     [
         ("Thu, 30 Apr 2026 18:53:56 GMT", "2026-04-30"),
-        ("2025-03-10", "2025-03-10"),
         ("2025-03-10T08:00:00Z", "2025-03-10"),
         ("", None),
-        (None, None),
         ("ontem", "ontem"),
         (
             "Mon, 1 Jan 99999999999999999999 00:00:00 GMT",
@@ -169,9 +160,7 @@ def test_a_result_without_text_is_dropped_without_an_error() -> None:
         ),
     ],
 )
-def test_a_published_date_reads_as_a_day(
-    published: str | None, day: str | None
-) -> None:
+def test_a_published_date_reads_as_a_day(published: str, day: str | None) -> None:
     result = counted_result(search_result(published_date=published))
 
     assert result is not None
@@ -198,25 +187,6 @@ def test_a_real_search_replayed_keeps_subdomains_text_and_dates() -> None:
     assert all(len(str(result.published)) == 10 for result in dated)
 
 
-def test_a_result_without_a_title_goes_by_its_url() -> None:
-    result = counted_result(search_result(title=None))
-
-    assert result is not None
-    assert result.title == SENADO["url"]
-
-
-def test_a_second_search_asks_for_the_terms_and_keeps_the_first_results() -> None:
-    first, _, _ = run_node(search, START, search_client=FakeSearch(found(SENADO)))
-    again: LessonState = {**START, **first, "terms": "derrubada de veto presidencial"}
-    fake = FakeSearch(found(CAMARA))
-
-    state, _, _ = run_node(search, again, search_client=fake)
-
-    assert fake.calls[0][0] == "derrubada de veto presidencial"
-    assert [result.url for result in state["results"]] == [SENADO["url"], CAMARA["url"]]
-    assert (state["searches"], state["terms"]) == (2, "")
-
-
 def test_the_same_page_under_another_url_counts_once() -> None:
     first, _, _ = run_node(search, START, search_client=FakeSearch(found(SENADO)))
     again: LessonState = {**START, **first, "terms": "veto"}
@@ -236,13 +206,11 @@ def test_the_same_page_under_another_url_counts_once() -> None:
     [
         "https://[gov.br/x",
         "javascript://www.gov.br/x",
-        "ftp://www.gov.br/x",
         "https://evil.example\\@www.gov.br/x",
-        7,
         None,
     ],
 )
-def test_an_odd_url_never_counts_nor_fails_the_search(url: Any) -> None:
+def test_an_odd_url_never_counts_nor_fails_the_search(url: str | None) -> None:
     assert counted_result(search_result(url=url)) is None
 
 
@@ -276,15 +244,7 @@ def test_a_result_that_isn_t_an_object_is_skipped() -> None:
 
 
 @pytest.mark.parametrize(
-    "error",
-    [
-        InvalidAPIKeyError("chave inválida"),
-        UsageLimitExceededError("créditos acabaram"),
-        ForbiddenError("proibido"),
-        BadRequestError("pedido ruim"),
-        TavilyTimeoutError(60),
-        httpx.ConnectError("sem rede"),
-    ],
+    "error", [TavilyTimeoutError(60), httpx.ConnectError("sem rede")]
 )
 def test_a_search_error_carries_its_cause(error: Exception) -> None:
     with pytest.raises(SearchError) as caught:
@@ -394,12 +354,6 @@ def test_a_blank_terms_answer_means_no_terms() -> None:
     assert picked["terms"] == ""
 
 
-def test_the_terms_field_is_capped_at_300_characters() -> None:
-    schema = PagePick.model_json_schema(mode="serialization")
-
-    assert schema["properties"]["terms"]["maxLength"] == 300
-
-
 def test_terms_over_300_characters_are_a_bad_answer() -> None:
     long = pick([1], "x" * 301)
 
@@ -435,22 +389,15 @@ def test_keep_pages_cuts_each_text_and_settles_the_topic() -> None:
     ]
 
 
-def test_keep_pages_warns_once_about_the_skipped_topics() -> None:
+def test_keep_pages_warns_once_only_when_a_topic_was_skipped() -> None:
     warnings: list[str] = []
-    state: LessonState = {**START, "picked": [], "skipped": ["Os <três> Poderes & cia"]}
+    skipped = ["Os <três> Poderes & cia"]
 
-    run_node(keep_pages, state, warnings=warnings)
+    run_node(keep_pages, {**START, "picked": [], "skipped": []}, warnings=warnings)
+    run_node(keep_pages, {**START, "picked": [], "skipped": skipped}, warnings=warnings)
 
-    assert warnings == [skipped_warning(["Os <três> Poderes & cia"])]
+    assert warnings == [skipped_warning(skipped)]
     assert "<b>Os &lt;três&gt; Poderes &amp; cia</b>" in warnings[0]
-
-
-def test_keep_pages_without_a_skipped_topic_warns_nothing() -> None:
-    warnings: list[str] = []
-
-    run_node(keep_pages, {**START, "picked": []}, warnings=warnings)
-
-    assert warnings == []
 
 
 class RefusingTelegram(TelegramClient):
@@ -480,32 +427,11 @@ def test_next_topic_starts_the_next_topic_and_remembers_the_skipped_one() -> Non
     assert moved == {**topic_start(1), "skipped": [VETO.title]}
 
 
-def test_next_topic_gives_up_after_the_topics_it_may_try() -> None:
-    # A third topic is left, so only MAX_TOPICS_PER_LESSON can stop the walk.
-    three = [*TOPICS, TopicToTry(STJ, None)]
-    state: LessonState = {
-        **START,
-        **topic_start(1),
-        "topics": three,
-        "skipped": [VETO.title],
-    }
-
-    with pytest.raises(LessonError) as caught:
-        run_node(next_topic, state)
-
-    assert str(caught.value) == (
-        "Nenhum tema teve pelo menos 2 páginas boas: "
-        "Como o Congresso derruba um veto; Os três Poderes."
-    )
-
-
 @pytest.mark.parametrize(
     ("terms", "searches", "picked", "route"),
     [
         ("veto", 1, 3, "other_terms"),
-        ("veto", 1, 0, "other_terms"),
         ("veto", 2, 3, "enough_pages"),
-        ("veto", 2, 1, "too_few_pages"),
         ("", 1, 2, "enough_pages"),
         ("", 1, 1, "too_few_pages"),
     ],

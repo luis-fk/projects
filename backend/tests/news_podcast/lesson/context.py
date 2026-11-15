@@ -8,7 +8,7 @@ import httpx
 
 from news_podcast.api.core.config import VOICE_RETRY_MINUTES
 from news_podcast.api.core.llm import TextModels
-from news_podcast.api.core.schemas import NewsStory, Usage
+from news_podcast.api.core.schemas import NewsStory
 from news_podcast.api.core.telegram import TelegramClient
 from news_podcast.api.lesson.schemas import CatalogTopic, LessonOptions
 from news_podcast.api.lesson.state import (
@@ -173,7 +173,6 @@ def lesson_context(
     asked: list[str] | None = None,
     built: dict[str, FakeChatModel] | None = None,
     options: LessonOptions | None = None,
-    usages: Sequence[Usage] = (),
     search: SearchClient | None = None,
     warnings: list[str] | None = None,
     warn: Warn | None = None,
@@ -189,7 +188,7 @@ def lesson_context(
         if warnings is not None:
             warnings.append(text)
 
-    progress = LessonProgress(usages=list(usages))
+    progress = LessonProgress()
     factory = fake_factory(
         {MODEL: answers if answers is not None else []},
         asked if asked is not None else [],

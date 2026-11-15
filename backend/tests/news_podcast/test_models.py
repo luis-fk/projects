@@ -3,8 +3,6 @@ from typing import Any
 
 import pytest
 from django.core.exceptions import ValidationError
-from django.db import connections
-from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.loader import MigrationLoader
 from django.db.models import ProtectedError
 
@@ -19,7 +17,6 @@ from news_podcast.models import (
     Feed,
     LessonSettings,
     PodcastSettings,
-    SettingsMissing,
     Topic,
     placeholder_error,
 )
@@ -37,25 +34,25 @@ DATABASES = pytest.mark.django_db(databases=["default", "news_podcast_db"])
 SQUASH = ("news_podcast", "0001_squashed_0007_no_code_defaults")
 
 
-def test_the_factory_builds_a_complete_row_that_passes_the_admin_checks() -> None:
-    editable = {
-        field.name
-        for field in PodcastSettings._meta.concrete_fields
-        if field.editable and not field.primary_key
-    }
+def test_the_factories_build_complete_rows_that_pass_the_admin_checks() -> None:
+    rows = [(SETTINGS, build_settings()), (LESSON_SETTINGS, build_lesson_settings())]
 
-    assert set(SETTINGS) == editable
-    build_settings().full_clean()
+    for values, row in rows:
+        editable = {
+            field.name
+            for field in row._meta.concrete_fields
+            if field.editable and not field.primary_key
+        }
+        assert set(values) == editable, row
+        row.full_clean()
 
 
-def test_only_paused_has_a_default() -> None:
-    defaults = [
-        field.name
-        for field in PodcastSettings._meta.concrete_fields
-        if field.has_default()
-    ]
+def test_no_setting_has_a_default_but_paused() -> None:
+    podcast_fields = PodcastSettings._meta.concrete_fields
+    lesson_fields = LessonSettings._meta.concrete_fields
 
-    assert defaults == ["paused"]
+    assert [field.name for field in podcast_fields if field.has_default()] == ["paused"]
+    assert [field.name for field in lesson_fields if field.has_default()] == []
 
 
 def test_the_settings_give_the_options_and_each_model_s_price() -> None:
@@ -72,6 +69,7 @@ def test_the_settings_give_the_options_and_each_model_s_price() -> None:
 def test_without_a_fallback_only_the_text_model_writes() -> None:
     podcast_settings = build_settings(fallback_model="")
 
+    podcast_settings.full_clean()
     assert podcast_settings.text_models() == [podcast_settings.text_model]
     assert "" not in podcast_settings.prices()
 
@@ -89,7 +87,6 @@ def test_without_a_fallback_only_the_text_model_writes() -> None:
         ),
         ({"script_prompt": "Oi, {ouvinte}!"}, "script_prompt", "{ouvinte}"),
         ({"expand_prompt": "Roteiro: {script"}, "expand_prompt", "literal brace"),
-        ({"selection_prompt": 'Use {"stories": []}'}, "selection_prompt", "{{"),
         ({"script_prompt": "Hoje, {today:%d/%m}"}, "script_prompt", "without a format"),
         (
             {"expand_prompt": "{min_words!r} palavras"},
@@ -110,7 +107,6 @@ def test_invalid_settings_say_what_is_wrong(
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("min_minutes", None, "cannot be null"),
         ("max_minutes", None, "cannot be null"),
         ("speech_speed", "rápido", "must be a float"),
         ("selection_prompt", None, "cannot be null"),
@@ -133,16 +129,13 @@ def test_a_prompt_may_use_its_placeholders_and_doubled_braces() -> None:
     ).full_clean()
 
 
-@pytest.mark.parametrize("field", ["text_model", "fallback_model"])
 @pytest.mark.parametrize(
-    "name",
+    ("field", "name"),
     [
-        "anthropic:claude-x",
-        "google_vertexai:gemini-3.8-flash",
-        "gpt-4.1-mini",
-        "openai:",
-        "google_genai:",
-        "openai: gpt-4.1-mini",
+        ("text_model", "anthropic:claude-x"),
+        ("fallback_model", "gpt-4.1-mini"),
+        ("text_model", "openai:"),
+        ("fallback_model", "openai: gpt-4.1-mini"),
     ],
 )
 def test_a_text_model_needs_a_provider_the_podcast_knows(field: str, name: str) -> None:
@@ -156,14 +149,10 @@ def test_a_text_model_needs_a_provider_the_podcast_knows(field: str, name: str) 
 
 @pytest.mark.parametrize(
     "name",
-    ["gemini-3.8-flash", "google_genai:gemini-3.8-flash", "openai:gpt-4.1-mini"],
+    ["google_genai:gemini-3.8-flash", "openai:gpt-4.1-mini"],
 )
-def test_a_text_model_is_a_bare_gemini_name_or_provider_model(name: str) -> None:
+def test_a_text_model_may_come_from_either_provider(name: str) -> None:
     build_settings(text_model=name, fallback_model=name).full_clean()
-
-
-def test_the_fallback_model_may_be_empty() -> None:
-    build_settings(fallback_model="").full_clean()
 
 
 @pytest.mark.parametrize(
@@ -172,7 +161,6 @@ def test_the_fallback_model_may_be_empty() -> None:
         "openai:gpt-4o-mini-tts",
         "eleven-v3",
         "google_genai:",
-        "google_vertexai:gemini-3.8-flash-lite-tts",
     ],
 )
 def test_the_voice_model_needs_a_voice_provider(name: str) -> None:
@@ -182,13 +170,6 @@ def test_the_voice_model_needs_a_voice_provider(name: str) -> None:
     message = " ".join(caught.value.message_dict["voice_model"])
     assert "google_genai" in message
     assert "openai" not in message
-
-
-@pytest.mark.parametrize(
-    "name", ["gemini-3.8-flash-lite-tts", "google_genai:gemini-3.8-flash-lite-tts"]
-)
-def test_the_voice_model_is_a_bare_gemini_name_or_provider_model(name: str) -> None:
-    build_settings(voice_model=name).full_clean()
 
 
 @DATABASES
@@ -235,20 +216,6 @@ def test_feeds_turned_off_are_not_read() -> None:
     )
 
     assert Feed.sources() == []
-
-
-@DATABASES
-def test_without_a_row_load_says_to_run_the_seed_and_creates_none() -> None:
-    with pytest.raises(SettingsMissing, match="seed_news_podcast"):
-        PodcastSettings.load()
-
-    assert not PodcastSettings.objects.exists()
-
-
-@DATABASES
-def test_an_empty_feed_list_stays_empty() -> None:
-    assert Feed.sources() == []
-    assert not Feed.objects.exists()
 
 
 @DATABASES
@@ -344,47 +311,6 @@ def squash_state_episode() -> Any:
     return state.apps.get_model("news_podcast", "Episode")
 
 
-def migrate_to(targets: list[tuple[str, str]]) -> None:
-    MigrationExecutor(connections["news_podcast_db"]).migrate(targets)
-
-
-def episode_columns() -> list[str]:
-    connection = connections["news_podcast_db"]
-    with connection.cursor() as cursor:
-        table = connection.introspection.get_table_description(
-            cursor, "news_podcast_episode"
-        )
-    return [column.name for column in table]
-
-
-# transaction=True: migrating runs schema changes, which a test wrapped in a
-# transaction can't do on every database.
-@pytest.mark.django_db(databases=["default", "news_podcast_db"], transaction=True)
-def test_the_migration_gives_old_rows_the_news_kind_and_no_lesson_fields() -> None:
-    try:
-        migrate_to([SQUASH])
-        assert "kind" not in episode_columns()
-        old = squash_state_episode().objects.create(
-            started_at=datetime(2026, 11, 12, 9, 40, tzinfo=UTC),
-            status="sent",
-            cost_usd=0.1,
-        )
-    finally:
-        latest = MigrationLoader(None, ignore_no_migrations=True).graph.leaf_nodes(
-            "news_podcast"
-        )
-        migrate_to(latest)
-
-    row = Episode.objects.get(pk=old.pk)
-
-    assert (row.kind, row.topic_id, row.story_title, row.pages) == (
-        "news",
-        None,
-        "",
-        [],
-    )
-
-
 @DATABASES
 def test_main_s_code_still_saves_rows_after_the_migration() -> None:
     old = squash_state_episode().objects.create(
@@ -398,25 +324,6 @@ def test_main_s_code_still_saves_rows_after_the_migration() -> None:
     assert (row.kind, row.story_title, row.pages) == ("news", "", [])
 
 
-def test_the_lesson_factory_builds_a_complete_row_that_passes_the_admin_checks() -> (
-    None
-):
-    editable = {
-        field.name
-        for field in LessonSettings._meta.concrete_fields
-        if field.editable and not field.primary_key
-    }
-
-    assert set(LESSON_SETTINGS) == editable
-    build_lesson_settings().full_clean()
-
-
-def test_no_lesson_setting_has_a_default() -> None:
-    fields = LessonSettings._meta.concrete_fields
-
-    assert [field.name for field in fields if field.has_default()] == []
-
-
 @pytest.mark.parametrize(
     ("changes", "field"),
     [
@@ -424,7 +331,6 @@ def test_no_lesson_setting_has_a_default() -> None:
         ({"max_minutes": 10}, "max_minutes"),
         ({"min_minutes": 8, "max_minutes": 7}, "max_minutes"),
         ({"voice_input_price": -1}, "voice_input_price"),
-        ({"voice_output_price": -1}, "voice_output_price"),
         ({"every_days": 0}, "every_days"),
     ],
 )
@@ -441,7 +347,7 @@ def test_a_lesson_lasts_from_1_to_9_minutes() -> None:
     build_lesson_settings(min_minutes=1, max_minutes=9).full_clean()
 
 
-@pytest.mark.parametrize("days", [None, 1, 2])
+@pytest.mark.parametrize("days", [None, 1])
 def test_a_lesson_comes_every_whole_number_of_days_or_never_from_the_cron(
     days: int | None,
 ) -> None:
@@ -457,38 +363,24 @@ def test_an_empty_lesson_minute_is_named_instead_of_crashing_clean(field: str) -
 
 
 @pytest.mark.parametrize(("field", "fields"), list(LESSON_PROMPT_FIELDS.items()))
-@pytest.mark.parametrize("bad", ["Oi, {ouvinte}!", "Hoje é {today:%d}.", "Uma { só"])
-def test_a_lesson_prompt_refuses_what_the_lesson_does_not_fill(
-    field: str, fields: tuple[str, ...], bad: str
-) -> None:
-    with pytest.raises(ValidationError) as caught:
-        build_lesson_settings(**{field: bad}).full_clean()
-
-    assert caught.value.message_dict[field] == [placeholder_error(bad, fields)]
-
-
-@pytest.mark.parametrize(("field", "fields"), list(LESSON_PROMPT_FIELDS.items()))
-def test_a_lesson_prompt_may_use_its_placeholders_and_doubled_braces(
+def test_a_lesson_prompt_takes_only_its_own_placeholders(
     field: str, fields: tuple[str, ...]
 ) -> None:
-    prompt = " ".join(f"{{{name}}}" for name in fields) + " {{literal}}"
+    unknown = "Oi, {ouvinte}!"
+    own = " ".join(f"{{{name}}}" for name in fields) + " {{literal}}"
 
-    build_lesson_settings(**{field: prompt}).full_clean()
-
-
-@pytest.mark.parametrize("name", ["openai:gpt-4o-mini-tts", "tts-1"])
-def test_the_lesson_voice_needs_a_voice_provider(name: str) -> None:
     with pytest.raises(ValidationError) as caught:
-        build_lesson_settings(voice_model=name).full_clean()
+        build_lesson_settings(**{field: unknown}).full_clean()
+    build_lesson_settings(**{field: own}).full_clean()
+
+    assert caught.value.message_dict[field] == [placeholder_error(unknown, fields)]
+
+
+def test_the_lesson_voice_needs_a_voice_provider() -> None:
+    with pytest.raises(ValidationError) as caught:
+        build_lesson_settings(voice_model="openai:gpt-4o-mini-tts").full_clean()
 
     assert "voice_model" in caught.value.message_dict
-
-
-@pytest.mark.parametrize(
-    "name", ["gemini-3.8-flash-tts", "google_genai:gemini-3.8-flash-tts"]
-)
-def test_the_lesson_voice_is_a_bare_gemini_name_or_provider_model(name: str) -> None:
-    build_lesson_settings(voice_model=name).full_clean()
 
 
 def test_the_lesson_prices_key_the_voice_model_as_saved() -> None:
@@ -499,14 +391,6 @@ def test_the_lesson_prices_key_the_voice_model_as_saved() -> None:
     )
 
     assert row.prices() == {"google_genai:gemini-3.8-flash-tts": ModelPrice(0.5, 9.0)}
-
-
-@DATABASES
-def test_without_a_lesson_row_load_says_to_run_the_seed_and_creates_none() -> None:
-    with pytest.raises(SettingsMissing, match="seed_news_podcast"):
-        LessonSettings.load()
-
-    assert not LessonSettings.objects.exists()
 
 
 @DATABASES

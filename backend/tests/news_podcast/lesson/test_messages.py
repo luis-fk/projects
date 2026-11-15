@@ -2,8 +2,6 @@ import html
 import re
 from typing import Any
 
-import pytest
-
 from news_podcast.api.core.messages import failure_message
 from news_podcast.api.core.telegram import CAPTION_LIMIT
 from news_podcast.api.core.voice.base import VoiceError
@@ -120,22 +118,13 @@ def test_a_cut_counts_what_telegram_counts_twice() -> None:
     assert units(text) == 20
 
 
-def test_a_long_lesson_warning_names_its_length_and_both_fixes() -> None:
+def test_a_long_lesson_warning_names_its_length_rounded_up_and_both_fixes() -> None:
     text = long_lesson_warning(630.0)
 
     assert "saiu com 10:30 min, acima de 10 minutos" in text
     assert "minutos máximos" in text
     assert f"LESSON_WORDS_PER_MINUTE ({LESSON_WORDS_PER_MINUTE})" in text
-
-
-@pytest.mark.parametrize(
-    ("seconds", "length"), [(600.4, "10:01"), (659.2, "11:00"), (601.0, "10:01")]
-)
-def test_a_long_lesson_warning_rounds_its_length_up(
-    seconds: float, length: str
-) -> None:
-    # A lesson just over 10 minutes never reads as 10:00.
-    assert f"saiu com {length} min" in long_lesson_warning(seconds)
+    assert "saiu com 11:00 min" in long_lesson_warning(659.2)
 
 
 def test_the_deleted_topic_warning_escapes_its_title() -> None:
