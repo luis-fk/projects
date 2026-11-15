@@ -5,7 +5,9 @@ happened in the previous 24 hours, from the feeds registered in the admin. It ar
 around 7:00 and, by default, lasts 12 to 18 minutes (8 to 12 at 1.5x). Feeds, length,
 speed, models, prices and prompts change in the Django admin (see *Settings*). The
 episode is only that voice message: each run's cost and result stay in the admin's
-history, and the sources it used, in the run's log on Railway.
+history, and the sources it used, in the run's log on Railway. The `lesson` action
+makes a lesson of under 10 minutes on one topic of the course in the admin, from
+pages of trusted sites (see *Lesson graph*).
 
 The app has its own database, `news_podcast_db` (`NEWS_PODCAST_DATABASE_URL`), with the
 settings, the feeds, the lesson catalog and the history. The rest is a management
@@ -242,35 +244,64 @@ graph TD;
 	keep_pages(keep_pages)
 	write_script(write_script)
 	review_script(review_script)
+	narrate(narrate)
+	build_audio(build_audio)
+	send(send)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> choose_topic;
+	build_audio -. &nbsp;not_sending&nbsp; .-> __end__;
+	build_audio -. &nbsp;sending&nbsp; .-> send;
 	choose_topic --> search;
 	keep_pages --> write_script;
+	narrate --> build_audio;
 	next_topic --> search;
 	pick_pages -. &nbsp;enough_pages&nbsp; .-> keep_pages;
 	pick_pages -. &nbsp;too_few_pages&nbsp; .-> next_topic;
 	pick_pages -. &nbsp;other_terms&nbsp; .-> search;
+	review_script --> narrate;
 	search --> pick_pages;
 	write_script --> review_script;
-	review_script --> __end__;
+	send --> __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc
 ```
 
+The last nodes voice the lesson, build its file and send it (`api/lesson/delivery.py`):
+
+- **Voice:** the lesson's own voice model, from *Lesson settings*, so it has its own
+  free daily quota, read in the lesson voice style. Like the daily's, it has no
+  fallback: an unavailable voice gets the waits of `VOICE_RETRY_MINUTES` (10 and 20
+  minutes), and a used-up quota or a refused request fails the lesson at once.
+- **Audio:** `news_podcast_output/aula-YYYY-MM-DD.ogg`, at the speech speed of
+  *Settings*. A lesson over 10 minutes still goes out, with a warning to lower the
+  maximum minutes or recalibrate `LESSON_WORDS_PER_MINUTE`.
+- **Sending:** one voice message to `TELEGRAM_CHAT_ID`. The caption has the topic, its
+  area and a link to each page under its title, cut so the caption fits Telegram's
+  1,024 characters.
+- **Failures:** the admin chat gets "Não consegui gerar a aula de hoje" with the step
+  and the error; with `--no-send`, only the log does. A lesson stops after 90 minutes
+  (`MAX_LESSON_MINUTES`).
+
 ## History
 
 Under *News podcast → Episodes*, one row per run: start time (Brasília), kind (news or
-lesson), status (sent,
-failed or, with `--no-send`, not sent), length, words per minute, cost on the paid plan
-in reais and, if it failed, the step and the error. Each run's page shows the script's
-words and the tokens of each model answer. At 1x speed, the words per minute are the
-voice's pace: if they are far from 170, `NATURAL_WORDS_PER_MINUTE` in
-`api/core/config.py` needs adjusting, or the episode comes out shorter or longer than
-asked. The audio is not kept. The top of the list shows the total cost of what is
-filtered (by month, kind or status). A lesson's page also shows its topic, the news
-story that opened it and the pages it came from. A paused run doesn't show up, and one that fails
-midway records the cost of what already ran.
+lesson), status (sent, failed or, with `--no-send`, not sent), length, words per
+minute, cost on the paid plan in reais and, if it failed, the step and the error. Each
+run's page shows the script's words and the tokens of each model answer. At 1x speed,
+the words per minute are the voice's pace: if they are far from 170,
+`NATURAL_WORDS_PER_MINUTE` in `api/core/config.py` needs adjusting, or the episode
+comes out shorter or longer than asked (for a lesson, 150 and
+`LESSON_WORDS_PER_MINUTE` in `api/lesson/config.py`). The audio is not kept. The top of
+the list shows the total cost of what is filtered (by month, kind or status). A paused
+run doesn't show up, and one that fails midway records the cost of what already ran.
+
+A lesson's page also shows its topic, the news story that opened it and the pages it
+came from, which a failed lesson keeps once its pages were found. Its cost counts the
+text at the prices in *Settings* and the voice at those in *Lesson settings*, plus
+the day's selection when the `lesson` action made it. If its topic is deleted in the
+admin while it runs, the row is saved without it, with the topic's title in the
+error, and the admin chat is told.
 
 ## Adjustments
 
@@ -290,10 +321,17 @@ the keys and `NEWS_PODCAST_DATABASE_URL` in `.env`, the migrations applied and
 
 ```
 uv run python manage.py news_podcast episode --no-send
+uv run python manage.py news_podcast lesson --no-send
 ```
 
-The audio and the selection's and the script's JSON go to `backend/news_podcast_output/`,
-which is in `.gitignore`.
+The audio and the episode's selection and script JSON go to
+`backend/news_podcast_output/`, which is in `.gitignore`. The `lesson` action, which
+also needs `TAVILY_API_KEY`, reads the feeds and makes the day's selection, as the
+episode does, then makes a lesson with no episode, so the lesson never says the news
+went out. Without `--no-send` it goes to `TELEGRAM_CHAT_ID` and counts as taught. A
+*Lesson settings* row seeded before the lesson's prompts were final keeps the old
+ones: paste the prompts from `seed/lesson_settings.json` in the admin, or delete the
+row and run `make seed` again.
 
 ## Good to know
 

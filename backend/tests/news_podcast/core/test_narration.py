@@ -1,12 +1,11 @@
 import asyncio
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from news_podcast.api.core.config import HOSTS, TTS_CHUNK_WORDS, VOICE_RETRY_MINUTES
 from news_podcast.api.core.costs import total_cost_usd
-from news_podcast.api.core.schemas import Host, ModelPrice, Turn, Usage
+from news_podcast.api.core.schemas import ModelPrice, Turn, Usage
 from news_podcast.api.core.turns import chunk_turns
 from news_podcast.api.core.voice.base import (
     VoiceError,
@@ -14,8 +13,9 @@ from news_podcast.api.core.voice.base import (
     VoiceUnavailableError,
 )
 from news_podcast.api.core.voice.narration import narrate
+from tests.news_podcast.fake_voice import VOICE_MODEL, FakeVoice
 
-MODEL = "google_genai:gemini-3.8-flash-lite-tts"
+MODEL = VOICE_MODEL
 STYLE = "Conversa calma."
 HEADLINE_STYLE = "Manchetes enfáticas."
 # Three turns of 400 words: each is a chunk of its own, since two pass 650 words.
@@ -23,45 +23,6 @@ LONG_SCRIPT = [
     Turn(speaker=speaker, text=" ".join([word] * 400))
     for speaker, word in [("Bia", "um"), ("Léo", "dois"), ("Bia", "três")]
 ]
-
-
-class FakeVoice:
-    """Answers each request in turn with the next outcome: None answers, an error is
-    raised. Without outcomes left, it answers."""
-
-    def __init__(
-        self,
-        outcomes: Sequence[Exception | None] = (),
-        usages: list[Usage] | None = None,
-    ) -> None:
-        self.outcomes = list(outcomes)
-        self.usages = usages
-        self.chunks: list[list[Turn]] = []
-        self.hosts: list[Sequence[Host]] = []
-        self.styles: list[tuple[str, str, str]] = []
-        self.usages_seen: list[int] = []
-
-    async def synthesize(
-        self,
-        turns: list[Turn],
-        hosts: Sequence[Host],
-        *,
-        style: str,
-        headline_style: str,
-        step: str,
-    ) -> tuple[bytes, Usage]:
-        self.chunks.append(turns)
-        self.hosts.append(hosts)
-        self.styles.append((style, headline_style, step))
-        if self.usages is not None:
-            self.usages_seen.append(len(self.usages))
-        outcome = self.outcomes.pop(0) if self.outcomes else None
-        if outcome is not None:
-            raise outcome
-        return (
-            f"audio {len(self.chunks)}".encode(),
-            Usage(step=step, model=MODEL, output_tokens=1_000),
-        )
 
 
 def record_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:

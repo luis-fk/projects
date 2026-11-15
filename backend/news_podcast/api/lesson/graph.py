@@ -12,7 +12,15 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 
 from news_podcast.api.core.schemas import Usage
+from news_podcast.api.core.telegram import notify_failure
 from news_podcast.api.lesson.config import MAX_LESSON_MINUTES, MAX_LESSON_STEPS
+from news_podcast.api.lesson.delivery import (
+    after_audio,
+    build_audio,
+    narrate_lesson,
+    send_lesson,
+)
+from news_podcast.api.lesson.messages import FAILURE_SUBJECT
 from news_podcast.api.lesson.script import review_script, write_script
 from news_podcast.api.lesson.sources import (
     after_pick,
@@ -39,6 +47,9 @@ NODES: tuple[tuple[str, str, Node], ...] = (
     ("keep_pages", "busca das fontes", keep_pages),
     ("write_script", "roteiro", write_script),
     ("review_script", "revisão", review_script),
+    ("narrate", "voz", narrate_lesson),
+    ("build_audio", "montagem do áudio", build_audio),
+    ("send", "envio", send_lesson),
 )
 
 
@@ -76,7 +87,12 @@ def build_graph() -> LessonGraph:
     graph.add_edge("next_topic", "search")
     graph.add_edge("keep_pages", "write_script")
     graph.add_edge("write_script", "review_script")
-    graph.add_edge("review_script", END)
+    graph.add_edge("review_script", "narrate")
+    graph.add_edge("narrate", "build_audio")
+    graph.add_conditional_edges(
+        "build_audio", after_audio, {"sending": "send", "not_sending": END}
+    )
+    graph.add_edge("send", END)
     return graph.compile()
 
 
@@ -98,7 +114,8 @@ class LessonOutcome:
 async def run_graph(inputs: LessonState, context: LessonContext) -> LessonOutcome:
     """Runs the lesson within its time and step limits, keeping the latest state, so
     a failure still has what the earlier nodes found. A failure comes back in the
-    outcome; only a cancellation from outside goes through."""
+    outcome, and reaches the admin chat when the lesson was to be sent; only a
+    cancellation from outside goes through."""
     state = inputs
     error: Exception | None = None
     limit = asyncio.timeout(MAX_LESSON_MINUTES * 60)
@@ -121,6 +138,14 @@ async def run_graph(inputs: LessonState, context: LessonContext) -> LessonOutcom
             error = LessonError(f"A aula passou de {MAX_LESSON_MINUTES} minutos")
         path = " → ".join(progress.path)
         logger.exception(f"The lesson failed at {progress.step} ({path})")
+        if inputs.get("send"):
+            await notify_failure(
+                context.telegram,
+                context.admin_chat,
+                FAILURE_SUBJECT,
+                progress.step,
+                error,
+            )
     return LessonOutcome(
         state, error, progress.step, list(progress.path), progress.usages
     )

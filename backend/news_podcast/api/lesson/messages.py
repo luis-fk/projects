@@ -1,15 +1,76 @@
-"""The lesson's warnings to the admin chat, which escape HTML and never fail the
-lesson."""
+"""The lesson's caption and its warnings to the admin chat, which escape HTML and
+never fail the lesson."""
 
 import html
 import logging
 from collections.abc import Sequence
 
-from news_podcast.api.core.telegram import TelegramClient, TelegramError
-from news_podcast.api.lesson.config import MIN_LESSON_PAGES
+from news_podcast.api.core.telegram import CAPTION_LIMIT, TelegramClient, TelegramError
+from news_podcast.api.lesson.config import (
+    LESSON_MINUTES_LIMIT,
+    LESSON_WORDS_PER_MINUTE,
+    MIN_LESSON_PAGES,
+)
+from news_podcast.api.lesson.schemas import CatalogTopic, LessonPage
 from news_podcast.api.lesson.state import Warn
 
 logger = logging.getLogger(__name__)
+
+FAILURE_SUBJECT = "a aula de hoje"
+LINK_PREFIX = "• "
+
+
+def lesson_caption(topic: CatalogTopic, pages: Sequence[LessonPage]) -> str:
+    """The topic, its area and a link to each page. Telegram counts the caption's
+    visible text, so the URLs inside href don't count: the titles share what the head
+    leaves, each cut before it is escaped, so a cut never splits an entity. The admin
+    caps the topic's and the area's lengths, so the head always leaves each title room
+    for at least its site's name."""
+    head = f"🎓 Aula · {topic.title}\n{topic.area}\n\nFontes:"
+    left = CAPTION_LIMIT - telegram_length(head)
+    room = left // max(len(pages), 1) - telegram_length(f"\n{LINK_PREFIX}")
+    lines = [
+        f"🎓 <b>Aula · {html.escape(topic.title)}</b>",
+        f"<i>{html.escape(topic.area)}</i>",
+        "",
+        "Fontes:",
+        *(
+            f'{LINK_PREFIX}<a href="{html.escape(page.url, quote=True)}">'
+            f"{html.escape(link_text(page, room))}</a>"
+            for page in pages
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def link_text(page: LessonPage, room: int) -> str:
+    """The page's title, cut to the room. With less room than the site's name, the
+    link shows the site's name, so it still says where it goes."""
+    title = page.title.strip()
+    if not title:
+        return page.site
+    if telegram_length(title) <= max(room, telegram_length(page.site)):
+        return title
+    if room < telegram_length(page.site):
+        return page.site
+    return cut(title, room)
+
+
+def cut(text: str, room: int) -> str:
+    """The text cut to `room` units, the ellipsis included."""
+    kept: list[str] = []
+    used = telegram_length("…")
+    for character in text:
+        used += telegram_length(character)
+        if used > room:
+            break
+        kept.append(character)
+    return "".join(kept) + "…"
+
+
+def telegram_length(text: str) -> int:
+    """Telegram counts text in UTF-16 code units, so an emoji can count twice."""
+    return len(text.encode("utf-16-le")) // 2
 
 
 def skipped_warning(titles: Sequence[str]) -> str:
@@ -18,6 +79,23 @@ def skipped_warning(titles: Sequence[str]) -> str:
         f"⚠️ A aula de hoje pulou {topics}: a busca não achou pelo menos "
         f"{MIN_LESSON_PAGES} páginas boas. Se isso se repetir, desmarque o tema no "
         "admin."
+    )
+
+
+def long_lesson_warning(duration_seconds: float) -> str:
+    minutes = f"{duration_seconds / 60:.1f}".replace(".", ",")
+    return (
+        f"⚠️ A aula de hoje saiu com {minutes} minutos, acima de "
+        f"{LESSON_MINUTES_LIMIT}. Baixe os minutos máximos em Lesson settings, no "
+        f"admin, ou recalibre LESSON_WORDS_PER_MINUTE ({LESSON_WORDS_PER_MINUTE}) "
+        "pelas palavras por minuto do histórico."
+    )
+
+
+def topic_gone_warning(title: str) -> str:
+    return (
+        f"⚠️ O tema <b>{html.escape(title)}</b> foi apagado no admin durante a aula de "
+        "hoje, então o histórico guardou a aula sem o tema, com o título no erro."
     )
 
 

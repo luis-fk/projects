@@ -5,10 +5,14 @@ that raises."""
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Any, Protocol, TypedDict
+
+import httpx
 
 from news_podcast.api.core.llm import TextModels
 from news_podcast.api.core.schemas import NewsStory, Turn, Usage
+from news_podcast.api.core.telegram import TelegramClient
 from news_podcast.api.lesson.schemas import (
     CatalogTopic,
     LessonOptions,
@@ -43,6 +47,9 @@ class LessonState(TypedDict, total=False):
     pages: list[LessonPage]
     turns: list[Turn]
     words: int
+    parts: list[Path]
+    audio: Path
+    duration_seconds: float
 
 
 class SearchClient(Protocol):
@@ -76,7 +83,8 @@ class LessonProgress:
 @dataclass(frozen=True)
 class LessonContext:
     """What the run gives every node: the settings and catalog snapshots, today's
-    São Paulo date, the clients built inside the run, and the progress."""
+    São Paulo date, the clients built inside the run, the chats, the progress, the
+    folder for the voice's parts and the voice waits left."""
 
     options: LessonOptions
     catalog: tuple[CatalogTopic, ...]
@@ -85,3 +93,9 @@ class LessonContext:
     progress: LessonProgress
     search: SearchClient | None
     warn: Warn
+    http_client: httpx.AsyncClient
+    telegram: TelegramClient | None
+    chat: str | None
+    admin_chat: str | None
+    workdir: Path
+    voice_waits: list[int]

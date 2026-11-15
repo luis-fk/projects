@@ -1,5 +1,6 @@
 import asyncio
 import json
+import tempfile
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -10,22 +11,37 @@ from tavily.errors import UsageLimitExceededError
 
 from news_podcast.api.core.config import TEXT_RETRY_MINUTES, VOICE_RETRY_MINUTES
 from news_podcast.api.core.llm import TextError, TextModels
+from news_podcast.api.core.messages import failure_message
 from news_podcast.api.core.telegram import TelegramClient, TelegramError
-from news_podcast.api.lesson import graph
+from news_podcast.api.core.voice.base import (
+    VoiceError,
+    VoiceQuotaExhaustedError,
+    VoiceUnavailableError,
+)
+from news_podcast.api.lesson import delivery, graph
 from news_podcast.api.lesson.config import MAX_LESSON_MINUTES, MAX_LESSON_STEPS
 from news_podcast.api.lesson.graph import LESSON_GRAPH, LessonOutcome, run_graph
-from news_podcast.api.lesson.messages import admin_warner
+from news_podcast.api.lesson.messages import (
+    FAILURE_SUBJECT,
+    admin_warner,
+    lesson_caption,
+)
 from news_podcast.api.lesson.schemas import CatalogTopic, TopicToTry
 from news_podcast.api.lesson.sources import SearchError
 from news_podcast.api.lesson.state import LessonError, LessonState, Warn
+from tests.news_podcast.factories import LESSON_SETTINGS
 from tests.news_podcast.fake_models import FakeChatModel
+from tests.news_podcast.fake_voice import FakeVoice
 from tests.news_podcast.lesson.context import (
     CATALOG,
     MODEL,
     POWERS,
     STORIES,
+    TODAY,
     VETO,
     FakeSearch,
+    FakeVoiceNote,
+    RecordingTelegram,
     answer,
     found,
     lesson_context,
@@ -54,9 +70,33 @@ def pick(pages: list[int], terms: str = "") -> str:
     return json.dumps({"pages": pages, "terms": terms})
 
 
-# The script and its review, after the pages.
+# The script and its review, after the pages. The review's 990 words are two voice
+# chunks.
 WRITTEN = [script_answer(), script_answer(*words_in(990), changes=["Cortei."])]
-TAIL = ["keep_pages", "write_script", "review_script"]
+TAIL = ["keep_pages", "write_script", "review_script", "narrate", "build_audio"]
+
+
+class Delivery:
+    """The voice and the audio's stand-ins: each voice built answers with `outcomes`,
+    shared by the run's chunks, and the audio is a FakeVoiceNote."""
+
+    def __init__(self) -> None:
+        self.built: list[str] = []
+        self.outcomes: list[Exception | None] = []
+        self.note = FakeVoiceNote()
+
+    def voice(self, model: str, http_client: httpx.AsyncClient) -> FakeVoice:
+        self.built.append(model)
+        return FakeVoice(self.outcomes, model=model)
+
+
+@pytest.fixture(autouse=True)
+def delivered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Delivery:
+    fakes = Delivery()
+    monkeypatch.setattr(delivery, "voice_provider", fakes.voice)
+    monkeypatch.setattr(delivery, "build_voice_note", fakes.note)
+    monkeypatch.setattr(delivery, "OUTPUT_DIR", tmp_path)
+    return fakes
 
 
 def run(
@@ -66,19 +106,30 @@ def run(
     warnings: list[str] | None = None,
     built: dict[str, FakeChatModel] | None = None,
     warn: Callable[[httpx.AsyncClient], Warn] | None = None,
+    *,
+    send: bool = False,
+    sent: list[tuple[Any, ...]] | None = None,
 ) -> LessonOutcome:
+    """One run with `send`, its workdir made for it, as the lesson makes it; with
+    `sent`, Telegram records there."""
+
     async def scenario() -> LessonOutcome:
-        async with offline_client() as client:
-            context = lesson_context(
-                client,
-                catalog,
-                answers=answers,
-                search=search,
-                warnings=warnings,
-                built=built,
-                warn=warn(client) if warn else None,
-            )
-            return await run_graph(INPUTS, context)
+        with tempfile.TemporaryDirectory() as workdir:
+            async with offline_client() as client:
+                context = lesson_context(
+                    client,
+                    catalog,
+                    answers=answers,
+                    search=search,
+                    warnings=warnings,
+                    built=built,
+                    warn=warn(client) if warn else None,
+                    telegram=None if sent is None else RecordingTelegram(client, sent),
+                    chat="chat",
+                    admin_chat="admin",
+                    workdir=Path(workdir),
+                )
+                return await run_graph({**INPUTS, "send": send}, context)
 
     return asyncio.run(asyncio.wait_for(scenario(), TEST_SECONDS))
 
@@ -101,6 +152,9 @@ def test_the_readme_shows_the_graph_as_it_is() -> None:
         "keep_pages",
         "write_script",
         "review_script",
+        "narrate",
+        "build_audio",
+        "send",
         "__end__",
     }
     assert readme_diagram() == drawing.draw_mermaid()
@@ -156,7 +210,7 @@ def test_terms_on_the_second_pick_start_no_third_search() -> None:
 
     assert outcome.error is None
     assert len(fake.calls) == 2
-    assert outcome.path[-3:] == TAIL
+    assert outcome.path[-len(TAIL) :] == TAIL
 
 
 def test_a_topic_short_of_pages_gives_way_to_the_next_with_one_warning() -> None:
@@ -200,7 +254,7 @@ def test_a_refused_warning_never_stops_the_lesson(
     )
 
     assert outcome.error is None
-    assert outcome.path[-3:] == TAIL
+    assert outcome.path[-len(TAIL) :] == TAIL
     assert "bot bloqueado" in caplog.text
 
 
@@ -265,6 +319,8 @@ def test_a_choice_that_counts_as_none_still_counts_in_the_usages() -> None:
         "pick",
         "script",
         "review",
+        "voice",
+        "voice",
     ]
 
 
@@ -316,10 +372,17 @@ def test_the_time_limit_cancels_the_running_node(
 
     monkeypatch.setattr(TextModels, "ask", never)
     monkeypatch.setattr(graph, "MAX_LESSON_MINUTES", 0.001)
+    sent: list[tuple[Any, ...]] = []
 
     async def scenario() -> tuple[LessonOutcome, list[bool], int]:
         async with httpx.AsyncClient() as client:
-            outcome = await run_graph(INPUTS, lesson_context(client, CATALOG))
+            context = lesson_context(
+                client,
+                CATALOG,
+                telegram=RecordingTelegram(client, sent),
+                admin_chat="admin",
+            )
+            outcome = await run_graph({**INPUTS, "send": True}, context)
         await asyncio.sleep(0)
         # Read before asyncio.run ends, since it cancels whatever is left on its own.
         left = len(asyncio.all_tasks()) - 1
@@ -334,6 +397,9 @@ def test_the_time_limit_cancels_the_running_node(
     assert outcome.step == "escolha do tema"
     assert cancelled_by_then == [True]
     assert left == 0
+    assert sent == [
+        ("admin", failure_message(FAILURE_SUBJECT, "escolha do tema", outcome.error))
+    ]
 
 
 def test_a_timeout_inside_a_node_keeps_its_own_error(
@@ -374,3 +440,133 @@ def test_the_runner_caps_the_steps(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert calls[0]["config"] == {"recursion_limit": MAX_LESSON_STEPS}
     assert calls[0]["stream_mode"] == "values"
+
+
+def test_a_sent_lesson_ends_with_its_voice_note_on_telegram(
+    delivered: Delivery, tmp_path: Path
+) -> None:
+    sent: list[tuple[Any, ...]] = []
+    answers = [answer(3, 2), pick([1, 2, 3]), *WRITTEN]
+
+    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)), send=True, sent=sent)
+
+    assert outcome.error is None
+    assert outcome.path == ["choose_topic", "search", "pick_pages", *TAIL, "send"]
+    assert delivered.built == [LESSON_SETTINGS["voice_model"]]
+    [(parts, audio, speed, _)] = delivered.note.calls
+    assert [part.name for part in parts] == ["voice_001.wav", "voice_002.wav"]
+    assert (audio, speed) == (tmp_path / f"aula-{TODAY:%Y-%m-%d}.ogg", 1.0)
+    caption = lesson_caption(VETO, outcome.state["pages"])
+    assert sent == [("chat", audio, caption, 546)]
+    assert [usage.step for usage in outcome.usages] == [
+        "choice",
+        "pick",
+        "script",
+        "review",
+        "voice",
+        "voice",
+    ]
+
+
+def test_without_sending_the_lesson_ends_at_its_voice_note(
+    delivered: Delivery,
+) -> None:
+    sent: list[tuple[Any, ...]] = []
+    answers = [answer(3, 2), pick([1, 2, 3]), *WRITTEN]
+
+    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)), sent=sent)
+
+    assert outcome.error is None
+    assert outcome.path[-1] == "build_audio"
+    assert outcome.state["duration_seconds"] == 545.6
+    assert len(delivered.note.calls) == 1
+    assert sent == []
+
+
+def test_the_longest_path_runs_within_the_step_limit() -> None:
+    sent: list[tuple[Any, ...]] = []
+    fake = FakeSearch(found(PAGES[0]), found(PAGES[0]), found(PAGES[0]), found(*PAGES))
+    answers = [
+        answer(3, 2),
+        pick([1], "a"),
+        pick([1]),
+        pick([1], "b"),
+        pick([1, 2, 3]),
+        *WRITTEN,
+    ]
+
+    outcome = run(CATALOG, answers, fake, send=True, sent=sent)
+
+    assert outcome.error is None
+    assert outcome.path == [
+        "choose_topic",
+        *["search", "pick_pages"] * 2,
+        "next_topic",
+        *["search", "pick_pages"] * 2,
+        *TAIL,
+        "send",
+    ]
+    assert len(outcome.path) == 16 < MAX_LESSON_STEPS
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize("send", [True, False])
+def test_a_failed_lesson_tells_the_admin_only_when_sending(send: bool) -> None:
+    sent: list[tuple[Any, ...]] = []
+
+    outcome = run([], [], send=send, sent=sent)
+
+    assert outcome.error is not None
+    notice = failure_message(FAILURE_SUBJECT, "escolha do tema", outcome.error)
+    assert notice.startswith("⚠️ Não consegui gerar a aula de hoje.")
+    assert sent == ([("admin", notice)] if send else [])
+
+
+@pytest.mark.parametrize(
+    ("failure", "waits"),
+    [
+        (
+            VoiceUnavailableError("503"),
+            [minutes * 60 for minutes in VOICE_RETRY_MINUTES],
+        ),
+        (VoiceQuotaExhaustedError("a cota do dia acabou"), []),
+        (VoiceError("Gemini respondeu 400"), []),
+    ],
+)
+def test_a_voice_failure_fails_the_lesson_at_the_voice_step(
+    monkeypatch: pytest.MonkeyPatch,
+    delivered: Delivery,
+    failure: Exception,
+    waits: list[int],
+) -> None:
+    waited: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(seconds: float) -> None:
+        if seconds:
+            waited.append(seconds)
+        else:
+            await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    # The first chunk is voiced; the second fails every time.
+    delivered.outcomes.extend([None, failure, failure, failure])
+    sent: list[tuple[Any, ...]] = []
+    answers = [answer(3, 2), pick([1, 2, 3]), *WRITTEN]
+
+    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)), send=True, sent=sent)
+
+    assert outcome.error is failure
+    assert outcome.step == "voz"
+    assert waited == waits
+    assert delivered.built == [LESSON_SETTINGS["voice_model"]]
+    assert delivered.note.calls == []
+    assert [usage.step for usage in outcome.usages] == [
+        "choice",
+        "pick",
+        "script",
+        "review",
+        "voice",
+    ]
+    assert outcome.state["topic"] == TopicToTry(VETO, STORIES[1])
+    assert [chat for chat, _ in sent] == ["admin"]

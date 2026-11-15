@@ -1,12 +1,15 @@
 import json
 from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from news_podcast.api.core.config import VOICE_RETRY_MINUTES
 from news_podcast.api.core.llm import TextModels
 from news_podcast.api.core.schemas import NewsStory, Usage
+from news_podcast.api.core.telegram import TelegramClient
 from news_podcast.api.lesson.schemas import CatalogTopic, LessonOptions
 from news_podcast.api.lesson.state import (
     LessonContext,
@@ -20,6 +23,8 @@ from tests.news_podcast.fake_models import FakeChatModel, fake_factory
 # A Saturday.
 TODAY = date(2026, 11, 14)
 MODEL = "gemini-text"
+# A workdir that doesn't exist, so a node that writes there fails the test.
+NO_WORKDIR = Path("/nonexistent/news_podcast_lesson")
 
 STORIES = [
     NewsStory("Câmara aprova a reforma", "Política", "o que muda para quem paga"),
@@ -61,11 +66,12 @@ def answer(candidate: int, story: int) -> str:
 
 class FakeSearch:
     """Answers the searches with `responses`, in order: an Exception raises. It
-    records each query with its options."""
+    records each query with its options, and whether the run closed it."""
 
     def __init__(self, *responses: Any) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.closed = False
 
     async def search(self, query: str, **options: Any) -> dict[str, Any]:
         self.calls.append((query, options))
@@ -73,6 +79,45 @@ class FakeSearch:
         if isinstance(response, Exception):
             raise response
         return response  # type: ignore[no-any-return]
+
+    async def __aenter__(self) -> "FakeSearch":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.closed = True
+
+
+class RecordingTelegram(TelegramClient):
+    """Records in `sent` each message as (chat, text) and each voice as (chat, path,
+    caption, duration), and sends nothing."""
+
+    def __init__(self, client: httpx.AsyncClient, sent: list[tuple[Any, ...]]) -> None:
+        super().__init__(client, "TOKEN")
+        self.sent = sent
+
+    async def send_message(self, chat_id: str, text: str) -> None:
+        self.sent.append((chat_id, text))
+
+    async def send_voice(
+        self, chat_id: str, voice_path: Path, caption: str, duration_seconds: int
+    ) -> None:
+        self.sent.append((chat_id, voice_path, caption, duration_seconds))
+
+
+class FakeVoiceNote:
+    """build_voice_note's stand-in, with no ffmpeg: it records each call's arguments
+    and writes the file, which lasts `duration` seconds."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[Path], Path, float, Path]] = []
+        self.duration = 545.6
+
+    async def __call__(
+        self, parts: list[Path], output: Path, speed: float, workdir: Path
+    ) -> float:
+        self.calls.append((parts, output, speed, workdir))
+        output.write_bytes(b"ogg")
+        return self.duration
 
 
 def search_result(**changes: Any) -> dict[str, Any]:
@@ -132,6 +177,11 @@ def lesson_context(
     search: SearchClient | None = None,
     warnings: list[str] | None = None,
     warn: Warn | None = None,
+    telegram: TelegramClient | None = None,
+    chat: str | None = None,
+    admin_chat: str | None = None,
+    workdir: Path = NO_WORKDIR,
+    voice_waits: list[int] | None = None,
 ) -> LessonContext:
     """A lesson run's context over the fake chat model, which gives `answers` in
     order, and the fake search; the warnings land in `warnings`."""
@@ -155,4 +205,10 @@ def lesson_context(
         progress=progress,
         search=search,
         warn=warn or record,
+        http_client=client,
+        telegram=telegram,
+        chat=chat,
+        admin_chat=admin_chat,
+        workdir=workdir,
+        voice_waits=list(VOICE_RETRY_MINUTES) if voice_waits is None else voice_waits,
     )
