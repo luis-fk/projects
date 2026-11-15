@@ -83,9 +83,9 @@ class LessonProgress:
 @dataclass(frozen=True)
 class LessonContext:
     """What the run gives every node: the settings and catalog snapshots, today's
-    São Paulo date, the clients built inside the run, the owner's chat, which gets
-    the lesson and its failure notice, the progress, the folder for the voice's parts
-    and the voice waits left."""
+    São Paulo date, the clients built inside the run, the admin chat
+    (`admin_chat_id()`), which gets the lesson and its failure notice, the progress,
+    the folder for the voice's parts and the voice waits left."""
 
     options: LessonOptions
     catalog: tuple[CatalogTopic, ...]

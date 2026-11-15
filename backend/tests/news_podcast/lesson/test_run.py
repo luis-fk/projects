@@ -955,7 +955,7 @@ def clock(instant: datetime) -> type:
 
 # D is 2026-03-09 in São Paulo; its lesson went out at 23:30, 02:30 UTC on the 10th.
 D_EVENING = datetime(2026, 3, 10, 2, 30, tzinfo=UTC)
-# The cron's 06:40 in São Paulo on D+1 and D+2.
+# The cron's 06:40 in São Paulo on D+1, D+2 and D+3.
 D1_MORNING = datetime(2026, 3, 10, 9, 40, tzinfo=UTC)
 D2_MORNING = datetime(2026, 3, 11, 9, 40, tzinfo=UTC)
 D3_MORNING = datetime(2026, 3, 12, 9, 40, tzinfo=UTC)

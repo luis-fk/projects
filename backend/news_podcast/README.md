@@ -349,11 +349,12 @@ The audio and the episode's selection and script JSON go to
 `backend/news_podcast_output/`, which is in `.gitignore`. The `lesson` action, which
 also needs `TAVILY_API_KEY`, reads the feeds and makes the day's selection, as the
 episode does, then makes a lesson with no episode, so the lesson never says the news
-went out. Without `--no-send` it goes to your chat with the bot and counts as taught. A
-*Lesson settings* row seeded before the lesson's prompts were final keeps the old ones:
-paste the prompts from `seed/lesson_settings.json` in the admin, or delete the row and
-run `make seed` again. One seeded before *A lesson every (days)* existed has it blank,
-so the cron makes no lessons until it is set in the admin.
+went out. Without `--no-send` it goes to the chat that gets the notices (see *Sending*
+under *Lesson graph*) and counts as taught. A *Lesson settings* row seeded before the
+lesson's prompts were final keeps the old ones: paste the prompts from
+`seed/lesson_settings.json` in the admin, or delete the row and run `make seed` again.
+One seeded before *A lesson every (days)* existed has it blank, so the cron makes no
+lessons until it is set in the admin.
 
 ## Good to know
 
