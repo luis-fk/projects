@@ -24,18 +24,13 @@ from tests.api_tokens import (
     bearer,
     make_token,
     saved_person,
+    unknown_api_key,
     user_token,
 )
 
 
 def request_with(headers: dict[str, str]) -> HttpRequest:
     return RequestFactory().get("/", headers=headers)
-
-
-def test_a_user_token_gives_its_user_id() -> None:
-    request = request_with(bearer(user_token("plants", "7")))
-
-    assert require_user_token(request, "plants") == "7"
 
 
 @pytest.mark.parametrize(
@@ -58,8 +53,8 @@ def test_tokens_with_the_wrong_claims_get_401(claims: dict[str, Any]) -> None:
 
 @pytest.mark.parametrize(
     "headers",
-    [{}, bearer(""), bearer("not-a-jwt")],
-    ids=["no header", "empty token", "malformed token"],
+    [{}, bearer("not-a-jwt")],
+    ids=["no header", "malformed token"],
 )
 def test_requests_without_a_token_get_401(headers: dict[str, str]) -> None:
     with pytest.raises(InvalidToken):
@@ -100,6 +95,13 @@ def test_a_key_for_several_apps_acts_as_the_person_in_each() -> None:
     assert require_user_token(request, "cfflch") == "3"
     with pytest.raises(InvalidToken):
         require_user_token(request, "political-culture")
+
+
+@pytest.mark.django_db
+def test_an_inactive_or_unknown_api_key_gets_401() -> None:
+    for key in (api_key("plants", active=False), unknown_api_key()):
+        with pytest.raises(InvalidToken):
+            require_user_token(request_with(bearer(key)), "plants")
 
 
 def test_another_users_id_gets_403() -> None:

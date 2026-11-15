@@ -95,8 +95,11 @@ def test_a_list_with_bad_filters_gets_400(
 
 
 @DATABASES
-def test_approving_a_result_keeps_its_class_room(client: Client) -> None:
+def test_a_change_to_a_result_moves_its_class_room_only_when_asked(
+    client: Client,
+) -> None:
     class_a = class_room("3A")
+    class_b = class_room("3B")
     fulano = student("Fulano de Tal", class_room=class_a)
 
     status, _ = update_result(client, fulano.id, {"approved": True})
@@ -106,16 +109,10 @@ def test_approving_a_result_keeps_its_class_room(client: Client) -> None:
     assert fulano.approved
     assert fulano.class_room_id == class_a.id
 
-
-@DATABASES
-def test_a_result_can_move_to_a_class_room_and_out_of_it(client: Client) -> None:
-    fulano = student("Fulano de Tal")
-    class_a = class_room("3A")
-
-    _, moved = update_result(client, fulano.id, {"class_room_id": class_a.id})
+    _, moved = update_result(client, fulano.id, {"class_room_id": class_b.id})
     _, removed = update_result(client, fulano.id, {"class_room_id": None})
 
-    assert moved["class_room_id"] == class_a.id
+    assert moved["class_room_id"] == class_b.id
     assert removed["class_room_id"] is None
     fulano.refresh_from_db()
     assert fulano.class_room is None
@@ -140,6 +137,15 @@ def test_an_invalid_change_gets_400(client: Client) -> None:
 
     assert status == 400
     assert "approved" in errors
+
+
+@DATABASES
+def test_a_missing_result_gets_404_when_changed_or_deleted(client: Client) -> None:
+    changed = update_result(client, 999, {"approved": True})
+    deleted = client.delete("/api/cfflch/admission-results/999/", headers=HEADERS)
+
+    assert changed == (404, {"error": "Not found"})
+    assert (deleted.status_code, deleted.json()) == (404, {"error": "Not found"})
 
 
 @DATABASES
