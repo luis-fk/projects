@@ -172,7 +172,7 @@ def test_a_lesson_over_ten_minutes_still_goes_out_with_one_warning(
 
     assert update["duration_seconds"] == duration
     assert len(warnings) == warned
-    assert all("10,0 minutos" in warning for warning in warnings)
+    assert all("10:01 min" in warning for warning in warnings)
 
 
 def test_send_sends_the_voice_note_with_its_caption_and_whole_seconds() -> None:

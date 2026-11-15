@@ -3,6 +3,7 @@ never fail the lesson."""
 
 import html
 import logging
+import math
 from collections.abc import Sequence
 
 from news_podcast.api.core.telegram import CAPTION_LIMIT, TelegramClient, TelegramError
@@ -83,12 +84,13 @@ def skipped_warning(titles: Sequence[str]) -> str:
 
 
 def long_lesson_warning(duration_seconds: float) -> str:
-    minutes = f"{duration_seconds / 60:.1f}".replace(".", ",")
+    # Rounded up, so a lesson just over the limit never reads as 10:00.
+    minutes, seconds = divmod(math.ceil(duration_seconds), 60)
     return (
-        f"⚠️ A aula de hoje saiu com {minutes} minutos, acima de "
-        f"{LESSON_MINUTES_LIMIT}. Baixe os minutos máximos em Lesson settings, no "
-        f"admin, ou recalibre LESSON_WORDS_PER_MINUTE ({LESSON_WORDS_PER_MINUTE}) "
-        "pelas palavras por minuto do histórico."
+        f"⚠️ A aula de hoje saiu com {minutes}:{seconds:02d} min, acima de "
+        f"{LESSON_MINUTES_LIMIT} minutos. Baixe os minutos máximos em Lesson "
+        "settings, no admin, ou recalibre LESSON_WORDS_PER_MINUTE "
+        f"({LESSON_WORDS_PER_MINUTE}) pelas palavras por minuto do histórico."
     )
 
 

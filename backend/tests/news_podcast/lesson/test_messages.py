@@ -2,6 +2,8 @@ import html
 import re
 from typing import Any
 
+import pytest
+
 from news_podcast.api.core.messages import failure_message
 from news_podcast.api.core.telegram import CAPTION_LIMIT
 from news_podcast.api.core.voice.base import VoiceError
@@ -83,6 +85,8 @@ def test_a_long_caption_is_cut_before_escaping_and_fits_telegrams_limit() -> Non
 
     shown = visible(caption)
     assert CAPTION_LIMIT - len(pages) < units(shown) <= CAPTION_LIMIT
+    # An href with a raw quote would end early, and the regex would miss its link.
+    assert len(links(caption)) == len(pages)
     assert re.findall(r"&(?!amp;|lt;|gt;|quot;|#x27;)", caption) == []
     assert "Aula · Vetos &amp; &lt;emendas&gt;" in caption
     assert "<i>Leis &amp; &lt;normas&gt;" in caption
@@ -119,9 +123,19 @@ def test_a_cut_counts_what_telegram_counts_twice() -> None:
 def test_a_long_lesson_warning_names_its_length_and_both_fixes() -> None:
     text = long_lesson_warning(630.0)
 
-    assert "10,5 minutos" in text
+    assert "saiu com 10:30 min, acima de 10 minutos" in text
     assert "minutos máximos" in text
     assert f"LESSON_WORDS_PER_MINUTE ({LESSON_WORDS_PER_MINUTE})" in text
+
+
+@pytest.mark.parametrize(
+    ("seconds", "length"), [(600.4, "10:01"), (659.2, "11:00"), (601.0, "10:01")]
+)
+def test_a_long_lesson_warning_rounds_its_length_up(
+    seconds: float, length: str
+) -> None:
+    # A lesson just over 10 minutes never reads as 10:00.
+    assert f"saiu com {length} min" in long_lesson_warning(seconds)
 
 
 def test_the_deleted_topic_warning_escapes_its_title() -> None:

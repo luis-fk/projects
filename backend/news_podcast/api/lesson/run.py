@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 from django.conf import settings
-from django.db import DatabaseError, close_old_connections
+from django.db import DatabaseError, IntegrityError, close_old_connections
 from django.utils import timezone
 from tavily import AsyncTavilyClient
 
@@ -92,16 +92,27 @@ def make_lesson(
         "news_sent": news_sent,
         "send": send,
     }
-    outcome = asyncio.run(
-        run_lesson(
-            inputs,
-            lesson_options(podcast_settings, lesson_settings),
-            catalog,
-            text_models=podcast_settings.text_models(),
-            usages=usages,
-            model_factory=model_factory,
+    progress = LessonProgress(usages=list(usages))
+    try:
+        outcome = asyncio.run(
+            run_lesson(
+                inputs,
+                lesson_options(podcast_settings, lesson_settings),
+                catalog,
+                progress,
+                text_models=podcast_settings.text_models(),
+                model_factory=model_factory,
+            )
         )
-    )
+    except Exception as error:
+        # The graph's own failures come back in its outcome: this is the run's
+        # clients failing, which still gets its row and its notice.
+        logger.exception(f"The lesson's run failed at {progress.step}")
+        if send:
+            asyncio.run(report_failure(FAILURE_SUBJECT, progress.step, error))
+        outcome = LessonOutcome(
+            inputs, error, progress.step, list(progress.path), progress.usages
+        )
     # The lesson can last up to MAX_LESSON_MINUTES: the write opens a new connection
     # if the database closed the one that read the settings.
     close_old_connections()
@@ -118,15 +129,14 @@ async def run_lesson(
     inputs: LessonState,
     options: LessonOptions,
     catalog: Sequence[CatalogTopic],
+    progress: LessonProgress,
     *,
     text_models: Sequence[str],
-    usages: Sequence[Usage],
     model_factory: ModelFactory,
 ) -> LessonOutcome:
     """Runs the graph with clients built inside this run, so its waits, model marks
     and connections are its own, and a workdir that outlives the voice's parts."""
     send = bool(inputs.get("send"))
-    progress = LessonProgress(usages=list(usages))
     async with httpx.AsyncClient() as http_client, search_client() as search:
         telegram = telegram_client(http_client)
         admin_chat = admin_chat_id()
@@ -173,8 +183,9 @@ def save_lesson(
 ) -> None:
     """The lesson's row. Its topic, story and pages come from the latest state once
     keep_pages ran, so a failed lesson keeps them too. A topic deleted in the admin
-    during the run fails the write, which goes again with no topic and the topic's
-    title in the error."""
+    during the run fails the write at its foreign key, and the row goes again with
+    no topic and the topic's title in the error; any other failure reaches the
+    caller."""
     state = outcome.state
     kept = state.get("topic")
     if outcome.error:
@@ -201,7 +212,9 @@ def save_lesson(
         return
     try:
         Episode.objects.create(**values, topic_id=kept.topic.id, error=error)
-    except DatabaseError:
+    except IntegrityError:
+        if Topic.objects.filter(pk=kept.topic.id).exists():
+            raise
         title = kept.topic.title
         logger.exception(f"Writing the lesson with its topic failed: {title}")
         Episode.objects.create(

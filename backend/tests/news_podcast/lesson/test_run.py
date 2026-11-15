@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -7,8 +8,9 @@ import httpx
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import DatabaseError
+from django.db import DatabaseError, IntegrityError, OperationalError
 from pytest_django import Settings
+from tavily import AsyncTavilyClient
 
 from news_podcast.api.core import telegram
 from news_podcast.api.core.config import VOICE_RETRY_MINUTES
@@ -92,7 +94,9 @@ class World:
     Telegram records in `sent`, for any client the run or a report builds."""
 
     def __init__(self, tmp_path: Path) -> None:
-        self.search = FakeSearch()
+        # Each run's Tavily client is a new FakeSearch with these responses.
+        self.responses: list[Any] = []
+        self.searches: list[FakeSearch] = []
         self.tavily_keys: list[str] = []
         self.sent: list[tuple[Any, ...]] = []
         self.voice_outcomes: list[Exception | None] = []
@@ -102,7 +106,8 @@ class World:
 
     def tavily(self, api_key: str) -> FakeSearch:
         self.tavily_keys.append(api_key)
-        return self.search
+        self.searches.append(FakeSearch(*self.responses))
+        return self.searches[-1]
 
     def telegram(self, http_client: httpx.AsyncClient) -> TelegramClient:
         return RecordingTelegram(http_client, self.sent)
@@ -176,7 +181,7 @@ def test_a_sent_lesson_is_saved_with_its_topic_story_and_pages(world: World) -> 
     create_settings()
     create_lesson_settings()
     catalog = create_catalog()
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
 
     error = make(STORIES, LESSON_ANSWERS)
 
@@ -205,7 +210,7 @@ def test_a_sent_lesson_is_saved_with_its_topic_story_and_pages(world: World) -> 
     assert caption.startswith("🎓 <b>Aula · Como o Congresso derruba um veto</b>")
     assert world.voice_models == [LESSON_SETTINGS["voice_model"]]
     assert world.tavily_keys == ["tavily-test-key"]
-    assert world.search.closed
+    assert [search.closed for search in world.searches] == [True]
 
 
 @DATABASE
@@ -213,7 +218,7 @@ def test_a_sent_lesson_takes_its_topic_out_of_the_candidates(world: World) -> No
     create_settings()
     create_lesson_settings()
     create_catalog()
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
 
     make(STORIES, LESSON_ANSWERS)
 
@@ -261,7 +266,7 @@ def test_a_voice_model_the_voice_refuses_fails_the_lesson_at_the_voice_step(
     # Saved without the admin's check, which refuses it.
     create_lesson_settings(voice_model="openai:gpt-4o-mini-tts")
     catalog = create_catalog()
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
     monkeypatch.setattr(delivery, "voice_provider", voice_provider)
 
     error = make(STORIES, LESSON_ANSWERS)
@@ -286,7 +291,7 @@ def test_without_sending_a_failure_only_reaches_the_log(
     create_settings()
     create_lesson_settings()
     create_catalog()
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
     world.voice_outcomes.append(VoiceError("a voz caiu"))
 
     error = make(STORIES, LESSON_ANSWERS, send=False)
@@ -305,14 +310,14 @@ def test_a_lesson_over_ten_minutes_still_goes_out_after_its_warning(
     create_settings()
     create_lesson_settings()
     create_catalog()
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
     world.note.duration = 630.0
 
     make(STORIES, LESSON_ANSWERS)
 
     [warning, voice] = world.sent
     assert warning[0] == "admin"
-    assert "10,5 minutos" in warning[1]
+    assert "10:30 min" in warning[1]
     assert (voice[0], voice[3]) == ("chat", 630)
     assert Episode.objects.get().status == Episode.Status.SENT
 
@@ -329,7 +334,7 @@ def test_a_refused_warning_is_logged_and_the_lesson_still_goes_out(
     create_settings()
     create_lesson_settings()
     create_catalog()
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
     world.note.duration = 630.0
     monkeypatch.setattr(
         lesson_run,
@@ -364,6 +369,7 @@ def test_the_time_limit_fails_the_lesson_at_the_step_running(
 
     assert str(error) == "A aula passou de 0.001 minutos"
     episode = Episode.objects.get()
+    assert episode.status == Episode.Status.FAILED
     assert episode.error == "escolha do tema: A aula passou de 0.001 minutos"
     assert [chat for chat, _ in world.messages()] == (["admin"] if send else [])
 
@@ -406,9 +412,10 @@ def test_each_lesson_builds_its_own_clients_inside_its_run(
     assert first.progress.usages is not selection
     assert first.voice_waits == list(VOICE_RETRY_MINUTES)
     assert first.voice_waits is not second.voice_waits
-    assert first.search is world.search
+    assert (first.search, second.search) == tuple(world.searches)
+    assert first.search is not second.search
     assert world.tavily_keys == ["tavily-test-key"] * 2
-    assert world.search.closed
+    assert [search.closed for search in world.searches] == [True, True]
     assert first.workdir != second.workdir
     assert not first.workdir.exists()
 
@@ -430,11 +437,12 @@ def test_with_no_tavily_key_the_lesson_has_no_search_client(
 
 
 def deleted_topic_outcome(
-    monkeypatch: pytest.MonkeyPatch, error: Exception | None
+    monkeypatch: pytest.MonkeyPatch, error: Exception | None, topic_id: int = 987_654
 ) -> None:
-    """A run whose topic was deleted in the admin before the row is written."""
+    """A run whose topic, by default, was deleted in the admin before the row is
+    written."""
     gone = TopicToTry(
-        catalog_topic(id=987_654, title="Como o Congresso derruba um veto"), None
+        catalog_topic(id=topic_id, title="Como o Congresso derruba um veto"), None
     )
     page = LessonPage(
         "Vetos", "www.camara.leg.br", "https://camara.leg.br/v", None, "", ""
@@ -503,14 +511,113 @@ def test_a_row_that_fails_twice_reaches_the_caller(
     create_settings()
     create_lesson_settings()
     deleted_topic_outcome(monkeypatch, None)
+    errors = [IntegrityError("o tema sumiu"), DatabaseError("o banco caiu")]
+    written: list[dict[str, Any]] = []
 
     def broken(**values: Any) -> Episode:
-        raise DatabaseError("o banco caiu")
+        written.append(values)
+        raise errors.pop(0)
 
     monkeypatch.setattr(Episode.objects, "create", broken)
 
     with pytest.raises(DatabaseError, match="o banco caiu"):
         lesson_run.make_lesson([], send=False, news_sent=False)
+    assert [values["topic_id"] for values in written] == [987_654, None]
+
+
+@DATABASE
+@pytest.mark.parametrize(
+    ("failure", "topic_kept"),
+    [
+        (OperationalError("a conexão caiu"), True),
+        (IntegrityError("outra regra"), True),
+        (OperationalError("a conexão caiu"), False),
+    ],
+)
+def test_a_failed_write_that_is_not_a_deleted_topic_reaches_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    failure: Exception,
+    topic_kept: bool,
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    topic = create_catalog()["veto"]
+    deleted_topic_outcome(monkeypatch, None, topic_id=topic.pk)
+    if not topic_kept:
+        topic.delete()
+    written: list[dict[str, Any]] = []
+
+    def broken(**values: Any) -> Episode:
+        written.append(values)
+        raise failure
+
+    monkeypatch.setattr(Episode.objects, "create", broken)
+
+    with pytest.raises(type(failure)):
+        lesson_run.make_lesson([], send=True, news_sent=False)
+    assert len(written) == 1
+    assert world.sent == []
+
+
+class LateEvening:
+    """23:30 in São Paulo on 2026-11-14, already 02:30 on the 15th in UTC."""
+
+    @staticmethod
+    def now(tz: tzinfo) -> datetime:
+        return datetime(2026, 11, 15, 2, 30, tzinfo=UTC).astimezone(tz)
+
+
+@DATABASE
+def test_a_late_evening_lesson_takes_its_sao_paulo_date(
+    monkeypatch: pytest.MonkeyPatch, world: World
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    seen = capture_run(monkeypatch)
+    monkeypatch.setattr(lesson_run, "datetime", LateEvening)
+
+    lesson_run.make_lesson([], send=False, news_sent=False)
+
+    [(context, _)] = seen
+    assert context.today == date(2026, 11, 14)
+
+
+@DATABASE
+@pytest.mark.parametrize("send", [True, False])
+def test_a_run_whose_clients_fail_is_still_saved_and_reported(
+    monkeypatch: pytest.MonkeyPatch, world: World, send: bool
+) -> None:
+    create_settings()
+    create_lesson_settings()
+
+    def broken(api_key: str) -> FakeSearch:
+        raise RuntimeError("o cliente do Tavily não abriu")
+
+    monkeypatch.setattr(lesson_run, "AsyncTavilyClient", broken)
+    selection = [Usage(step="selection", model=MODEL, input_tokens=1_000_000)]
+
+    error = lesson_run.make_lesson([], send=send, news_sent=False, usages=selection)
+
+    assert str(error) == "o cliente do Tavily não abriu"
+    episode = Episode.objects.get()
+    assert episode.status == Episode.Status.FAILED
+    assert episode.error == "início: o cliente do Tavily não abriu"
+    assert episode.cost_usd == pytest.approx(SETTINGS["text_input_price"])
+    notices = [chat for chat, text in world.messages() if "Etapa:</b> início" in text]
+    assert notices == (["admin"] if send else [])
+
+
+def test_the_search_client_is_tavilys_own_and_opens_and_closes(
+    settings: Settings,
+) -> None:
+    settings.TAVILY_API_KEY = "tavily-test-key"
+
+    async def scenario() -> object:
+        async with lesson_run.search_client() as client:
+            return client
+
+    assert isinstance(asyncio.run(scenario()), AsyncTavilyClient)
 
 
 def lesson_over(
@@ -552,7 +659,7 @@ def test_the_lesson_action_counts_the_selection_before_the_lesson(
     create_settings()
     create_lesson_settings()
     create_catalog()
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
     selection_of(monkeypatch, Selection(STORIES, [SELECTION_USAGE], None))
     lesson_over(monkeypatch, LESSON_ANSWERS)
 
@@ -572,7 +679,7 @@ def test_after_a_failed_selection_the_lesson_takes_the_course_order(
     create_settings()
     create_lesson_settings()
     catalog = create_catalog()
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
     failed = Selection([], [SELECTION_USAGE], EpisodeError("a seleção falhou"))
     selection_of(monkeypatch, failed)
     # No stories, so no choice is asked.
@@ -615,7 +722,7 @@ def test_two_topics_short_of_pages_fail_the_command_at_the_search_step(
     create_settings()
     create_lesson_settings()
     create_catalog()
-    world.search.responses.extend([found(PAGES[0])] * 2)
+    world.responses.extend([found(PAGES[0])] * 2)
     selection_of(monkeypatch, Selection(STORIES, [], None))
     lesson_over(monkeypatch, [answer(1, 2), pick([1]), pick([1])])
 
@@ -704,7 +811,7 @@ def test_the_lesson_action_without_sending_makes_the_whole_lesson_locally(
     Feed.objects.create(
         outlet="g1", section=Feed.Section.POLITICA, url="https://g1.globo.com/rss/g1/"
     )
-    world.search.responses.append(found(*PAGES))
+    world.responses.append(found(*PAGES))
 
     async def fetch(*_args: object) -> list[NewsItem]:
         return [
