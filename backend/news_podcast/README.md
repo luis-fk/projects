@@ -60,7 +60,8 @@ A Cron service in the Railway project, from the same repository:
 2. In *Variables*: `RAILPACK_DEPLOY_APT_PACKAGES=ffmpeg` (installs ffmpeg on this
    service only), `GEMINI_API_KEY`, `OPENAI_API_KEY` (only if a text model is OpenAI's),
    `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ADMIN_CHAT_ID` and
-   `NEWS_PODCAST_DATABASE_URL`. To start, Django also needs `SECRET_KEY`,
+   `NEWS_PODCAST_DATABASE_URL`, plus `TAVILY_API_KEY` (the web service's) for the
+   lessons. To start, Django also needs `SECRET_KEY`,
    `API_TOKEN_SECRET` (32 characters or more), `OPEN_WEATHER_API_KEY`, `SERVER_URL`,
    `NGROK_URL`, `FRONT_END_URL`, `ENVIRONMENT=development` (so it doesn't ask for
    `REDIS_URL`) and the other four `*_DATABASE_URL`. Dummy values work for those (the
@@ -75,9 +76,23 @@ minutes before the episode's hour (`40 21 * * *` sends around 19:00 in Brasília
 the midnight episode (cron between 23:00 and 0:00 in Brasília): it would arrive before
 midnight, already dated the next day. A run only starts if the previous one has ended.
 
+**Lessons:** with `--lesson-every-days 2` added to the Custom Start Command, a lesson
+follows the episode every 2 days. The number is whole days from 1, and a lesson is due
+once that many São Paulo days passed since the latest lesson sent, a lesson made with
+the `lesson` action included (a failed or unsent one doesn't count), so with none sent
+the first one comes on the first run. Add the option only once the release that brings
+it is on `main`, and remove it before rolling back past that release: older code
+refuses it, and the cron would then make no episode at all. The episode always goes
+first and saves its row; then the lesson reads the settings again, so ticking
+*Paused* while the episode runs stops the lesson too. Each part reports its own
+failure, a failed lesson leaves the episode as it went, and the run fails naming each
+failed part. A lesson after a failed episode still uses the stories it selected, and
+says the news didn't go out. With the lesson, a run can last up to 3.5 hours: 2 for the
+episode and 90 minutes for the lesson.
+
 A backend deploy also redeploys this service and kills a running execution, with no
 grace period. So releases to `main` stay out of the episode's time, from 6:40 until it
-arrives.
+arrives, and on lesson days until the lesson arrives.
 
 To run it by hand, use the service's *Run now* or `railway cron run`. Since it is the
 cron's command, it respects the pause and reads the news up to the full hour it started

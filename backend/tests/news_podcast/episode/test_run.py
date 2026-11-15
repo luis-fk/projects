@@ -19,7 +19,8 @@ from news_podcast.api.core.schemas import ModelPrice, NewsStory, Usage
 from news_podcast.api.core.telegram import TelegramClient
 from news_podcast.api.episode import run
 from news_podcast.api.episode import service as service_module
-from news_podcast.api.episode.schemas import EpisodeReport, NewsItem
+from news_podcast.api.episode.run import EpisodeOutcome
+from news_podcast.api.episode.schemas import EpisodeReport, NewsItem, SelectedStory
 from news_podcast.api.episode.service import EpisodeError, EpisodeService
 from news_podcast.models import Episode, Feed, PodcastSettings, SettingsMissing
 from tests.news_podcast.factories import SETTINGS, build_settings, create_settings
@@ -257,8 +258,9 @@ def test_the_command_makes_the_episode_through_run(
 ) -> None:
     calls: list[tuple[bool, bool]] = []
 
-    def make_episode(*, scheduled: bool, send: bool) -> None:
+    def make_episode(*, scheduled: bool, send: bool) -> EpisodeOutcome:
         calls.append((scheduled, send))
+        return EpisodeOutcome(paused=False, sent=send, stories=[], error=None)
 
     monkeypatch.setattr(run, "make_episode", make_episode)
 
@@ -430,3 +432,87 @@ def test_each_run_builds_its_own_text_models_and_clients(
     assert isinstance(model_b, ChatOpenAI)
     assert model_a.http_async_client is client_a
     assert model_b.http_async_client is client_b
+
+
+SELECTED = [
+    SelectedStory(
+        title="Juros sobem", category="economia", angle="o crédito", item_ids=["1"]
+    ),
+    SelectedStory(title="Chuva no Sul", item_ids=["2"]),
+]
+
+
+@DATABASE
+@pytest.mark.parametrize(
+    ("send", "failure", "sent"),
+    [
+        (True, None, True),
+        (False, None, False),
+        (True, EpisodeError("a voz caiu"), False),
+    ],
+)
+def test_the_run_returns_its_outcome_with_the_days_stories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    send: bool,
+    failure: Exception | None,
+    sent: bool,
+) -> None:
+    create_settings()
+
+    async def make(
+        service: EpisodeService, *, scheduled: bool, send: bool
+    ) -> EpisodeReport:
+        service.stories = SELECTED
+        if failure:
+            raise failure
+        return EpisodeReport(
+            audio_path=tmp_path / "resumo.ogg",
+            duration_seconds=900.0,
+            caption="🎙️",
+            script_words=2550,
+        )
+
+    monkeypatch.setattr(EpisodeService, "generate_episode", make)
+
+    outcome = run.make_episode(scheduled=True, send=send)
+
+    assert outcome == EpisodeOutcome(
+        paused=False,
+        sent=sent,
+        stories=[
+            NewsStory("Juros sobem", "economia", "o crédito"),
+            NewsStory("Chuva no Sul", "geral", ""),
+        ],
+        error=failure,
+    )
+    assert Episode.objects.get().status == (
+        Episode.Status.FAILED
+        if failure
+        else Episode.Status.SENT
+        if send
+        else Episode.Status.NOT_SENT
+    )
+
+
+@DATABASE
+def test_a_paused_run_returns_a_paused_outcome_and_saves_no_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    create_settings(paused=True)
+    replace_episode(monkeypatch, tmp_path)
+
+    outcome = run.make_episode(scheduled=True, send=True)
+
+    assert outcome == EpisodeOutcome(paused=True, sent=False, stories=[], error=None)
+    assert not Episode.objects.exists()
+
+
+@DATABASE
+def test_a_settings_failure_still_raises_out_of_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record_notices(monkeypatch)
+
+    with pytest.raises(SettingsMissing):
+        run.make_episode(scheduled=True, send=False)

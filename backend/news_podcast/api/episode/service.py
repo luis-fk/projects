@@ -78,6 +78,8 @@ class EpisodeService:
         self.step = "início"
         # Every answer, kept as the run goes, so a failed run has its cost too.
         self.usages: list[Usage] = []
+        # The selection's stories, kept for the lesson even when a later step fails.
+        self.stories: list[SelectedStory] = []
         # Built inside the run, so its waits and model marks are this run's.
         self.text = TextModels(
             settings.text_models, self.usages, http_client, model_factory
@@ -152,6 +154,7 @@ class EpisodeService:
 
         self.step = "seleção das notícias"
         stories = await self._select_stories(items, start, end)
+        self.stories = stories
 
         self.step = "leitura das matérias"
         briefs = await build_briefs(

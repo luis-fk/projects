@@ -408,3 +408,66 @@ def test_the_voice_step_draws_on_the_run_s_waits_and_keeps_its_usage(
     assert waits == [VOICE_RETRY_MINUTES[0] * 60]
     assert service.voice_waits == list(VOICE_RETRY_MINUTES[1:])
     assert service.usages == [TEXT_USAGE, voice_usage]
+
+
+SELECTED = [
+    SelectedStory(
+        title="Juros sobem", category="economia", angle="o crédito", item_ids=["1"]
+    ),
+    SelectedStory(title="Chuva no Sul", item_ids=["2"]),
+]
+
+
+def test_the_selected_stories_stay_with_the_service_when_a_later_step_fails(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, tmp_path: Path
+) -> None:
+    settings.GEMINI_API_KEY = "test-key"
+
+    async def scenario() -> EpisodeService:
+        transport = httpx.MockTransport(no_voice_request)
+        async with httpx.AsyncClient(transport=transport) as client:
+            snapshot = episode_settings(build_settings()).model_copy(
+                update={"voice_model": "openai:gpt-4o-mini-tts"}
+            )
+            service = EpisodeService(
+                http_client=client,
+                telegram=None,
+                chat_id=None,
+                settings=snapshot,
+                sources=[],
+            )
+            reach_the_voice(monkeypatch, service, tmp_path)
+
+            async def select(*_args: object) -> list[SelectedStory]:
+                return SELECTED
+
+            monkeypatch.setattr(service, "_select_stories", select)
+            with pytest.raises(VoiceError):
+                await service.generate_episode(scheduled=False, send=False)
+            return service
+
+    assert asyncio.run(scenario()).stories == SELECTED
+
+
+def test_a_run_that_fails_before_the_selection_has_no_stories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_items(*_args: object) -> list[NewsItem]:
+        return []
+
+    monkeypatch.setattr(service_module, "fetch_items", no_items)
+
+    async def scenario() -> EpisodeService:
+        async with httpx.AsyncClient() as client:
+            service = EpisodeService(
+                http_client=client,
+                telegram=None,
+                chat_id=None,
+                settings=episode_settings(build_settings()),
+                sources=[],
+            )
+            with pytest.raises(EpisodeError):
+                await service.generate_episode(scheduled=False, send=False)
+            return service
+
+    assert asyncio.run(scenario()).stories == []
