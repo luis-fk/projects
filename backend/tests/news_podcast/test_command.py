@@ -240,3 +240,14 @@ def test_a_settings_failure_of_the_episode_raises_with_no_lesson(
             "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
         )
     assert [name for name, _ in calls] == ["episode"]
+
+
+@pytest.mark.parametrize("action", ["lesson", "chat-id"])
+def test_the_cadence_goes_only_with_the_episode_action(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    calls = record_runs(monkeypatch, SENT)
+
+    with pytest.raises(CommandError, match="--lesson-every-days"):
+        call_command("news_podcast", action, "--lesson-every-days", "2")
+    assert calls == []

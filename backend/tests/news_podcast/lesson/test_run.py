@@ -1026,7 +1026,6 @@ def test_paused_skips_only_a_scheduled_lesson(
     assert error is None
     assert len(seen) == int(runs)
     assert Episode.objects.count() == int(runs)
-    assert world.sent == []
 
 
 @DATABASE
@@ -1171,7 +1170,7 @@ def test_both_failures_are_saved_reported_once_each_and_named(
     failed = Episode.Status.FAILED
     assert kinds_and_statuses() == [(NEWS, failed), (LESSON, failed)]
     news = Episode.objects.get(kind=NEWS)
-    assert news.error == "início: a voz caiu"
+    assert news.error.endswith(": a voz caiu")
     notices = [text.split("\n")[0] for _, text in world.messages()]
     assert notices == [
         "⚠️ Não consegui gerar o episódio de hoje.",
@@ -1202,9 +1201,15 @@ def test_an_episode_that_fails_before_its_selection_leaves_the_course_order(
             "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
         )
 
+    assert kinds_and_statuses() == [
+        (NEWS, Episode.Status.FAILED),
+        (LESSON, Episode.Status.SENT),
+    ]
     lesson = Episode.objects.get(kind=LESSON)
-    assert (lesson.status, lesson.topic) == (Episode.Status.SENT, catalog["veto"])
+    assert lesson.topic == catalog["veto"]
     assert lesson.story_title == ""
+    notices = [text.split("\n")[0] for _, text in world.messages()]
+    assert notices == ["⚠️ Não consegui gerar o episódio de hoje."]
 
 
 @DATABASE
@@ -1336,3 +1341,31 @@ def test_the_lesson_starts_with_fresh_text_models_and_its_own_limit(
     assert lesson_text.dropped == set()
     assert limits == [MAX_RUN_MINUTES * 60, MAX_LESSON_MINUTES * 60]
     assert Episode.objects.get(kind=LESSON).status == Episode.Status.SENT
+
+
+@DATABASE
+def test_a_failed_lesson_leaves_the_sent_news_as_it_went(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    create_catalog()
+    world.responses.append(found(*PAGES))
+    world.voice_outcomes.append(VoiceError("a voz da aula caiu"))
+    episode_ends(monkeypatch, world, tmp_path)
+    lesson_over(monkeypatch, LESSON_ANSWERS)
+
+    with pytest.raises(CommandError) as raised:
+        call_command(
+            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
+        )
+
+    assert str(raised.value) == "aula: a voz da aula caiu"
+    assert kinds_and_statuses() == [
+        (NEWS, Episode.Status.SENT),
+        (LESSON, Episode.Status.FAILED),
+    ]
+    assert Episode.objects.get(kind=NEWS).error == ""
+    assert world.sent[0][2] == "🎙️ Resumo das 7"
+    notices = [text.split("\n")[0] for _, text in world.messages()]
+    assert notices == ["⚠️ Não consegui gerar a aula de hoje."]

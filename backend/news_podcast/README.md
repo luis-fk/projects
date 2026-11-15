@@ -78,13 +78,17 @@ midnight, already dated the next day. A run only starts if the previous one has 
 
 **Lessons:** with `--lesson-every-days 2` added to the Custom Start Command, a lesson
 follows the episode every 2 days. The number is whole days from 1, and a lesson is due
-once that many São Paulo days passed since the latest lesson sent (a failed or unsent
-one doesn't count), so the first one comes on the first run. The episode always goes
+once that many São Paulo days passed since the latest lesson sent, a lesson made with
+the `lesson` action included (a failed or unsent one doesn't count), so with none sent
+the first one comes on the first run. Add the option only once the release that brings
+it is on `main`, and remove it before rolling back past that release: older code
+refuses it, and the cron would then make no episode at all. The episode always goes
 first and saves its row; then the lesson reads the settings again, so ticking
 *Paused* while the episode runs stops the lesson too. Each part reports its own
 failure, a failed lesson leaves the episode as it went, and the run fails naming each
 failed part. A lesson after a failed episode still uses the stories it selected, and
-says the news didn't go out.
+says the news didn't go out. With the lesson, a run can last up to 3.5 hours: 2 for the
+episode and 90 minutes for the lesson.
 
 A backend deploy also redeploys this service and kills a running execution, with no
 grace period. So releases to `main` stay out of the episode's time, from 6:40 until it

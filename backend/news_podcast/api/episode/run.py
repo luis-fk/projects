@@ -82,9 +82,10 @@ def episode_settings(podcast_settings: PodcastSettings) -> EpisodeSettings:
 
 def make_episode(*, scheduled: bool, send: bool) -> EpisodeOutcome:
     """Makes the episode with the settings from the admin and saves the run in the
-    history, failed or not, and returns how it ended; a failure was already
-    reported. Only a settings failure raises, so no lesson follows it. The database
-    is only used here, outside the event loop, where Django's ORM can run."""
+    history, failed or not, and returns how it ended; a failure in the run was
+    already reported. A failure outside the run, such as its settings or its
+    history write, still raises, so no lesson follows it. The database is only used
+    here, outside the event loop, where Django's ORM can run."""
     try:
         podcast_settings = PodcastSettings.load()
         sources = Feed.sources()

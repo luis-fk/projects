@@ -29,6 +29,8 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args: Any, **options: Any) -> None:
+        if options["lesson_every_days"] is not None and options["action"] != "episode":
+            raise CommandError("--lesson-every-days só vale com a ação episode")
         configure_logging()
         send = not options["no_send"]
         try:
@@ -75,8 +77,9 @@ def make_episode(*, scheduled: bool, send: bool, every_days: int | None) -> None
                 every_days=every_days,
             )
         except Exception as raised:
-            # Only the lesson's history write raises, and the news row is saved.
-            logger.exception("The lesson's row couldn't be saved")
+            # The lesson reports its own failures; this one escaped them, and the
+            # news row is already saved.
+            logger.exception("The lesson failed outside its own reporting")
             error = raised
         if error:
             failures.append(f"aula: {error}")
