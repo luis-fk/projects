@@ -425,6 +425,7 @@ def test_no_lesson_setting_has_a_default() -> None:
         ({"min_minutes": 8, "max_minutes": 7}, "max_minutes"),
         ({"voice_input_price": -1}, "voice_input_price"),
         ({"voice_output_price": -1}, "voice_output_price"),
+        ({"every_days": 0}, "every_days"),
     ],
 )
 def test_invalid_lesson_settings_say_what_is_wrong(
@@ -438,6 +439,13 @@ def test_invalid_lesson_settings_say_what_is_wrong(
 
 def test_a_lesson_lasts_from_1_to_9_minutes() -> None:
     build_lesson_settings(min_minutes=1, max_minutes=9).full_clean()
+
+
+@pytest.mark.parametrize("days", [None, 1, 2])
+def test_a_lesson_comes_every_whole_number_of_days_or_never_from_the_cron(
+    days: int | None,
+) -> None:
+    build_lesson_settings(every_days=days).full_clean()
 
 
 @pytest.mark.parametrize("field", ["min_minutes", "max_minutes"])

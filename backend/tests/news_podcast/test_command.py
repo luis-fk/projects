@@ -113,58 +113,30 @@ def record_runs(
 SENT = EpisodeOutcome(paused=False, sent=True, stories=STORIES, error=None)
 
 
-def test_without_the_option_the_episode_runs_alone(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("args", "send"), [([], True), (["--no-send"], False)])
+def test_a_run_by_hand_makes_no_lesson(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], send: bool
 ) -> None:
     calls = record_runs(monkeypatch, SENT)
 
-    call_command("news_podcast", "episode", "--scheduled")
+    call_command("news_podcast", "episode", *args)
 
-    assert calls == [("episode", {"scheduled": True, "send": True})]
+    assert calls == [("episode", {"scheduled": False, "send": send})]
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "dois", "1.5"])
-def test_the_option_refuses_anything_but_a_whole_number_from_one(
-    monkeypatch: pytest.MonkeyPatch, value: str
+@pytest.mark.parametrize(("args", "send"), [([], True), (["--no-send"], False)])
+def test_the_crons_lesson_follows_the_episode_and_decides_for_itself(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], send: bool
 ) -> None:
     calls = record_runs(monkeypatch, SENT)
 
-    with pytest.raises(CommandError, match="--lesson-every-days"):
-        call_command("news_podcast", "episode", "--lesson-every-days", value)
-    assert calls == []
-
-
-@pytest.mark.parametrize(
-    ("args", "scheduled", "send"),
-    [
-        (["--scheduled"], True, True),
-        ([], False, True),
-        (["--scheduled", "--no-send"], True, False),
-    ],
-)
-@pytest.mark.parametrize("days", [1, 2])
-def test_the_lesson_follows_the_episode_with_the_runs_options(
-    monkeypatch: pytest.MonkeyPatch,
-    args: list[str],
-    scheduled: bool,
-    send: bool,
-    days: int,
-) -> None:
-    calls = record_runs(monkeypatch, SENT)
-
-    call_command("news_podcast", "episode", *args, "--lesson-every-days", str(days))
+    call_command("news_podcast", "episode", "--scheduled", *args)
 
     assert calls == [
-        ("episode", {"scheduled": scheduled, "send": send}),
+        ("episode", {"scheduled": True, "send": send}),
         (
             "lesson",
-            {
-                "stories": STORIES,
-                "send": send,
-                "news_sent": True,
-                "scheduled": scheduled,
-                "every_days": days,
-            },
+            {"stories": STORIES, "send": send, "news_sent": True, "scheduled": True},
         ),
     ]
 
@@ -179,7 +151,7 @@ def test_after_a_failed_episode_the_lesson_gets_its_stories_and_no_news(
     calls = record_runs(monkeypatch, failed)
 
     with pytest.raises(CommandError, match="^episódio: a voz caiu$"):
-        call_command("news_podcast", "episode", "--lesson-every-days", "2")
+        call_command("news_podcast", "episode", "--scheduled")
 
     [_, (_, lesson)] = calls
     assert (lesson["stories"], lesson["news_sent"]) == (stories, False)
@@ -189,7 +161,7 @@ def test_a_paused_run_makes_no_lesson(monkeypatch: pytest.MonkeyPatch) -> None:
     paused = EpisodeOutcome(paused=True, sent=False, stories=[], error=None)
     calls = record_runs(monkeypatch, paused)
 
-    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+    call_command("news_podcast", "episode", "--scheduled")
 
     assert [name for name, _ in calls] == ["episode"]
 
@@ -218,14 +190,14 @@ def test_the_command_names_each_failed_part(
     record_runs(monkeypatch, news, lesson_error, lesson_raises)
 
     with pytest.raises(CommandError) as raised:
-        call_command("news_podcast", "episode", "--lesson-every-days", "2")
+        call_command("news_podcast", "episode", "--scheduled")
     assert str(raised.value) == message
 
 
 def test_both_parts_succeeding_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = record_runs(monkeypatch, SENT)
 
-    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+    call_command("news_podcast", "episode", "--scheduled")
 
     assert [name for name, _ in calls] == ["episode", "lesson"]
 
@@ -236,18 +208,15 @@ def test_a_settings_failure_of_the_episode_raises_with_no_lesson(
     calls = record_runs(monkeypatch, SettingsMissing("rode seed_news_podcast"))
 
     with pytest.raises(CommandError, match="rode seed_news_podcast"):
-        call_command(
-            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
-        )
+        call_command("news_podcast", "episode", "--scheduled")
     assert [name for name, _ in calls] == ["episode"]
 
 
-@pytest.mark.parametrize("action", ["lesson", "chat-id"])
-def test_the_cadence_goes_only_with_the_episode_action(
-    monkeypatch: pytest.MonkeyPatch, action: str
-) -> None:
+def test_the_cadence_option_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = record_runs(monkeypatch, SENT)
 
-    with pytest.raises(CommandError, match="--lesson-every-days"):
-        call_command("news_podcast", action, "--lesson-every-days", "2")
+    with pytest.raises(CommandError, match="unrecognized arguments: --lesson-every"):
+        call_command(
+            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
+        )
     assert calls == []

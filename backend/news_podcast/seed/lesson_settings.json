@@ -1,4 +1,5 @@
 {
+  "every_days": 2,
   "min_minutes": 6,
   "max_minutes": 9,
   "voice_model": "gemini-3.8-flash-tts",

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from argparse import ArgumentTypeError
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
@@ -22,15 +21,8 @@ class Command(BaseCommand):
         parser.add_argument("action", nargs="?", default="episode", choices=ACTIONS)
         parser.add_argument("--scheduled", action="store_true")
         parser.add_argument("--no-send", action="store_true")
-        parser.add_argument(
-            "--lesson-every-days",
-            type=whole_days,
-            help="Depois do episódio, uma aula a cada N dias (1 ou mais).",
-        )
 
     def handle(self, *args: Any, **options: Any) -> None:
-        if options["lesson_every_days"] is not None and options["action"] != "episode":
-            raise CommandError("--lesson-every-days só vale com a ação episode")
         configure_logging()
         send = not options["no_send"]
         try:
@@ -39,42 +31,23 @@ class Command(BaseCommand):
             elif options["action"] == "lesson":
                 make_lesson(send=send)
             else:
-                make_episode(
-                    scheduled=options["scheduled"],
-                    send=send,
-                    every_days=options["lesson_every_days"],
-                )
+                make_episode(scheduled=options["scheduled"], send=send)
         except Exception as error:
             raise CommandError(str(error)) from error
 
 
-def whole_days(value: str) -> int:
-    """The lesson's cadence: a whole number of days, from 1."""
-    try:
-        days = int(value)
-    except ValueError:
-        raise ArgumentTypeError(f"{value} não é um número inteiro de dias") from None
-    if days < 1:
-        raise ArgumentTypeError("use 1 dia ou mais")
-    return days
-
-
-def make_episode(*, scheduled: bool, send: bool, every_days: int | None) -> None:
-    """The daily episode, then, with every_days, the lesson when it is due. The
-    news always goes first, each part reports its own failure, and the command
-    fails naming each failed part."""
+def make_episode(*, scheduled: bool, send: bool) -> None:
+    """The daily episode, then, on the cron's run, the lesson, which Lesson settings'
+    cadence lets through when one is due. The news always goes first, each part
+    reports its own failure, and the command fails naming each failed part."""
     news = run.make_episode(scheduled=scheduled, send=send)
     if news.paused:
         return
     failures = [f"episódio: {news.error}"] if news.error else []
-    if every_days is not None:
+    if scheduled:
         try:
             error = lesson_run.make_lesson(
-                news.stories,
-                send=send,
-                news_sent=news.sent,
-                scheduled=scheduled,
-                every_days=every_days,
+                news.stories, send=send, news_sent=news.sent, scheduled=True
             )
         except Exception as raised:
             # The lesson reports its own failures; this one escaped them, and the

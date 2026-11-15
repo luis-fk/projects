@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta, tzinfo
@@ -41,7 +42,13 @@ from news_podcast.api.lesson.graph import LessonOutcome, run_graph
 from news_podcast.api.lesson.schemas import LessonPage, TopicToTry
 from news_podcast.api.lesson.state import LessonContext, LessonState
 from news_podcast.api.lesson.topics import candidates
-from news_podcast.models import Episode, Feed, PodcastSettings, Topic
+from news_podcast.models import (
+    Episode,
+    Feed,
+    PodcastSettings,
+    SettingsMissing,
+    Topic,
+)
 from tests.news_podcast.factories import (
     LESSON_SETTINGS,
     SETTINGS,
@@ -218,7 +225,7 @@ def test_a_sent_lesson_is_saved_with_its_topic_story_and_pages(world: World) -> 
         "voice",
     ]
     [(chat, audio, caption, duration)] = world.sent
-    assert (chat, duration) == ("chat", 546)
+    assert (chat, duration) == ("admin", 546)
     assert audio.parent == world.output
     assert caption.startswith("🎓 <b>Aula · Como o Congresso derruba um veto</b>")
     assert world.voice_models == [LESSON_SETTINGS["voice_model"]]
@@ -331,8 +338,24 @@ def test_a_lesson_over_ten_minutes_still_goes_out_after_its_warning(
     [warning, voice] = world.sent
     assert warning[0] == "admin"
     assert "10:30 min" in warning[1]
-    assert (voice[0], voice[3]) == ("chat", 630)
+    assert (voice[0], voice[3]) == ("admin", 630)
     assert Episode.objects.get().status == Episode.Status.SENT
+
+
+@DATABASE
+def test_without_an_admin_chat_the_lesson_goes_to_the_episode_chat(
+    world: World, settings: Settings
+) -> None:
+    settings.TELEGRAM_ADMIN_CHAT_ID = None
+    create_settings()
+    create_lesson_settings()
+    create_catalog()
+    world.responses.append(found(*PAGES))
+
+    error = make(STORIES, LESSON_ANSWERS)
+
+    assert error is None
+    assert [entry[0] for entry in world.sent] == ["chat"]
 
 
 class RefusingMessages(RecordingTelegram):
@@ -359,7 +382,7 @@ def test_a_refused_warning_is_logged_and_the_lesson_still_goes_out(
 
     assert error is None
     assert "bot bloqueado no chat do admin" in caplog.text
-    assert [entry[0] for entry in world.sent] == ["chat"]
+    assert [entry[0] for entry in world.sent] == ["admin"]
     assert Episode.objects.get().status == Episode.Status.SENT
 
 
@@ -978,9 +1001,7 @@ def test_with_a_lesson_every_two_days_only_the_second_day_makes_one(
 
     def run_at(instant: datetime) -> Exception | None:
         monkeypatch.setattr(lesson_run, "datetime", clock(instant))
-        return lesson_run.make_lesson(
-            [], send=False, news_sent=True, scheduled=True, every_days=2
-        )
+        return lesson_run.make_lesson([], send=False, news_sent=True, scheduled=True)
 
     assert run_at(D1_MORNING) is None
     assert seen == []
@@ -1005,7 +1026,7 @@ def test_a_failed_or_unsent_lesson_leaves_the_next_one_due(
     seen = capture_run(monkeypatch)
     monkeypatch.setattr(lesson_run, "datetime", clock(D2_MORNING))
 
-    lesson_run.make_lesson([], send=False, news_sent=True, scheduled=True, every_days=2)
+    lesson_run.make_lesson([], send=False, news_sent=True, scheduled=True)
 
     assert len(seen) == 1
 
@@ -1019,9 +1040,7 @@ def test_paused_skips_only_a_scheduled_lesson(
     create_lesson_settings()
     seen = capture_run(monkeypatch)
 
-    error = lesson_run.make_lesson(
-        [], send=True, news_sent=True, scheduled=scheduled, every_days=2
-    )
+    error = lesson_run.make_lesson([], send=True, news_sent=True, scheduled=scheduled)
 
     assert error is None
     assert len(seen) == int(runs)
@@ -1041,9 +1060,7 @@ def test_a_failed_read_of_the_last_lesson_is_reported_with_no_row(
 
     monkeypatch.setattr(lesson_run, "last_lesson_sent_on", broken)
 
-    error = lesson_run.make_lesson(
-        [], send=True, news_sent=True, scheduled=True, every_days=2
-    )
+    error = lesson_run.make_lesson([], send=True, news_sent=True, scheduled=True)
 
     assert str(error) == "a conexão caiu"
     assert seen == []
@@ -1051,6 +1068,75 @@ def test_a_failed_read_of_the_last_lesson_is_reported_with_no_row(
     [(chat, text)] = world.messages()
     assert chat == "admin"
     assert "<b>Etapa:</b> configurações" in text
+
+
+@DATABASE
+def test_without_a_cadence_the_cron_makes_no_lesson_and_says_why(
+    monkeypatch: pytest.MonkeyPatch, world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    create_settings()
+    create_lesson_settings(every_days=None)
+    seen = capture_run(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=lesson_run.__name__):
+        error = lesson_run.make_lesson([], send=True, news_sent=True, scheduled=True)
+
+    assert error is None
+    assert seen == []
+    assert not Episode.objects.exists()
+    assert world.sent == []
+    assert "Lesson settings has no cadence" in caplog.text
+
+
+@DATABASE
+@pytest.mark.parametrize("every_days", [None, 2])
+def test_a_lesson_on_demand_ignores_the_cadence(
+    monkeypatch: pytest.MonkeyPatch, world: World, every_days: int | None
+) -> None:
+    create_settings()
+    create_lesson_settings(every_days=every_days)
+    # A lesson already went out today.
+    create_lesson_row(started_at=D2_MORNING)
+    seen = capture_run(monkeypatch)
+    monkeypatch.setattr(lesson_run, "datetime", clock(D2_MORNING))
+
+    lesson_run.make_lesson([], send=False, news_sent=False)
+
+    assert len(seen) == 1
+
+
+@DATABASE
+def test_the_cron_reads_its_cadence_from_lesson_settings_and_reports_a_missing_row(
+    monkeypatch: pytest.MonkeyPatch, world: World
+) -> None:
+    create_settings()
+    # A lesson already went out today, but the cadence lives in the missing row.
+    create_lesson_row(started_at=D2_MORNING)
+    seen = capture_run(monkeypatch)
+    monkeypatch.setattr(lesson_run, "datetime", clock(D2_MORNING))
+
+    error = lesson_run.make_lesson([], send=True, news_sent=True, scheduled=True)
+
+    assert isinstance(error, SettingsMissing)
+    assert seen == []
+    assert Episode.objects.count() == 1
+    [(chat, text)] = world.messages()
+    assert chat == "admin"
+    assert "<b>Etapa:</b> configurações" in text
+
+
+@DATABASE
+def test_a_paused_cron_run_reads_no_lesson_settings(
+    monkeypatch: pytest.MonkeyPatch, world: World
+) -> None:
+    create_settings(paused=True)
+    seen = capture_run(monkeypatch)
+
+    error = lesson_run.make_lesson([], send=True, news_sent=True, scheduled=True)
+
+    assert error is None
+    assert seen == []
+    assert world.sent == []
 
 
 SELECTED_STORIES = [
@@ -1102,6 +1188,38 @@ NEWS, LESSON = Episode.Kind.NEWS, Episode.Kind.LESSON
 
 
 @DATABASE
+def test_with_a_blank_cadence_the_cron_sends_only_the_news(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    create_lesson_settings(every_days=None)
+    create_catalog()
+    episode_ends(monkeypatch, world, tmp_path)
+    lesson_over(monkeypatch, [])
+
+    call_command("news_podcast", "episode", "--scheduled")
+
+    assert kinds_and_statuses() == [(NEWS, Episode.Status.SENT)]
+    assert len(world.sent) == 1
+
+
+@DATABASE
+def test_a_run_by_hand_makes_no_lesson_even_when_one_is_due(
+    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    create_catalog()
+    episode_ends(monkeypatch, world, tmp_path)
+    lesson_over(monkeypatch, [])
+
+    call_command("news_podcast", "episode")
+
+    assert kinds_and_statuses() == [(NEWS, Episode.Status.SENT)]
+    assert len(world.sent) == 1
+
+
+@DATABASE
 def test_a_due_lesson_follows_the_sent_news_and_saves_its_row_after(
     monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
 ) -> None:
@@ -1113,12 +1231,14 @@ def test_a_due_lesson_follows_the_sent_news_and_saves_its_row_after(
     built: dict[str, FakeChatModel] = {}
     lesson_over(monkeypatch, fake_factory({MODEL: list(LESSON_ANSWERS)}, [], built))
 
-    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+    call_command("news_podcast", "episode", "--scheduled")
 
     sent = Episode.Status.SENT
     assert kinds_and_statuses() == [(NEWS, sent), (LESSON, sent)]
     assert [entry[2] for entry in world.sent][0] == "🎙️ Resumo das 7"
     assert world.sent[1][2].startswith("🎓 <b>Aula · ")
+    # The news goes to the group, the lesson to the owner's chat.
+    assert [entry[0] for entry in world.sent] == ["chat", "admin"]
     script_request = built[MODEL].received[2]
     assert "Resumo enviado: sim." in str(script_request[0].content)
 
@@ -1134,14 +1254,7 @@ def test_without_sending_both_rows_are_not_sent_and_nothing_goes_out(
     episode_ends(monkeypatch, world, tmp_path)
     lesson_over(monkeypatch, LESSON_ANSWERS)
 
-    call_command(
-        "news_podcast",
-        "episode",
-        "--scheduled",
-        "--lesson-every-days",
-        "2",
-        "--no-send",
-    )
+    call_command("news_podcast", "episode", "--scheduled", "--no-send")
 
     not_sent = Episode.Status.NOT_SENT
     assert kinds_and_statuses() == [(NEWS, not_sent), (LESSON, not_sent)]
@@ -1162,9 +1275,7 @@ def test_both_failures_are_saved_reported_once_each_and_named(
     lesson_over(monkeypatch, fake_factory({MODEL: list(LESSON_ANSWERS)}, [], built))
 
     with pytest.raises(CommandError) as raised:
-        call_command(
-            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
-        )
+        call_command("news_podcast", "episode", "--scheduled")
 
     assert str(raised.value) == "episódio: a voz caiu; aula: a voz da aula caiu"
     failed = Episode.Status.FAILED
@@ -1197,9 +1308,7 @@ def test_an_episode_that_fails_before_its_selection_leaves_the_course_order(
     lesson_over(monkeypatch, LESSON_ANSWERS[1:])
 
     with pytest.raises(CommandError, match="^episódio: Nenhuma notícia"):
-        call_command(
-            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
-        )
+        call_command("news_podcast", "episode", "--scheduled")
 
     assert kinds_and_statuses() == [
         (NEWS, Episode.Status.FAILED),
@@ -1221,9 +1330,7 @@ def test_a_failed_episode_and_no_lesson_settings_name_both_parts(
     lesson_over(monkeypatch, [])
 
     with pytest.raises(CommandError) as raised:
-        call_command(
-            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
-        )
+        call_command("news_podcast", "episode", "--scheduled")
 
     assert str(raised.value).startswith(
         "episódio: a voz caiu; aula: Não há configurações da aula no banco"
@@ -1252,7 +1359,7 @@ def test_paused_while_the_news_runs_stops_the_lesson(
 
     monkeypatch.setattr(episode_run, "close_old_connections", tick_paused)
 
-    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+    call_command("news_podcast", "episode", "--scheduled")
 
     assert kinds_and_statuses() == [(NEWS, Episode.Status.SENT)]
     assert len(world.sent) == 1
@@ -1267,7 +1374,7 @@ def test_paused_at_the_start_runs_neither_part(
     episode_ends(monkeypatch, world, tmp_path)
     lesson_over(monkeypatch, [])
 
-    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+    call_command("news_podcast", "episode", "--scheduled")
 
     assert not Episode.objects.exists()
     assert world.sent == []
@@ -1282,9 +1389,7 @@ def test_a_news_settings_failure_is_reported_once_with_no_lesson(
     lesson_over(monkeypatch, [])
 
     with pytest.raises(CommandError, match="seed_news_podcast"):
-        call_command(
-            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
-        )
+        call_command("news_podcast", "episode", "--scheduled")
 
     assert not Episode.objects.exists()
     [(chat, text)] = world.messages()
@@ -1333,7 +1438,7 @@ def test_the_lesson_starts_with_fresh_text_models_and_its_own_limit(
 
     monkeypatch.setattr(episode_run, "close_old_connections", after_the_episode)
 
-    call_command("news_podcast", "episode", "--scheduled", "--lesson-every-days", "2")
+    call_command("news_podcast", "episode", "--scheduled")
 
     [lesson_text] = lesson_texts
     assert lesson_text is not episode_texts[0]
@@ -1356,9 +1461,7 @@ def test_a_failed_lesson_leaves_the_sent_news_as_it_went(
     lesson_over(monkeypatch, LESSON_ANSWERS)
 
     with pytest.raises(CommandError) as raised:
-        call_command(
-            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
-        )
+        call_command("news_podcast", "episode", "--scheduled")
 
     assert str(raised.value) == "aula: a voz da aula caiu"
     assert kinds_and_statuses() == [

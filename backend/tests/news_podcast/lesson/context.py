@@ -179,7 +179,6 @@ def lesson_context(
     warn: Warn | None = None,
     telegram: TelegramClient | None = None,
     chat: str | None = None,
-    admin_chat: str | None = None,
     workdir: Path = NO_WORKDIR,
     voice_waits: list[int] | None = None,
 ) -> LessonContext:
@@ -208,7 +207,6 @@ def lesson_context(
         http_client=client,
         telegram=telegram,
         chat=chat,
-        admin_chat=admin_chat,
         workdir=workdir,
         voice_waits=list(VOICE_RETRY_MINUTES) if voice_waits is None else voice_waits,
     )

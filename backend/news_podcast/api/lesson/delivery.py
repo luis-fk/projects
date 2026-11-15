@@ -43,7 +43,9 @@ async def build_audio(state: LessonState, context: LessonContext) -> LessonState
 
 async def send_lesson(state: LessonState, context: LessonContext) -> LessonState:
     if context.telegram is None or not context.chat:
-        raise LessonError("TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não configurado")
+        raise LessonError(
+            "TELEGRAM_BOT_TOKEN ou TELEGRAM_ADMIN_CHAT_ID não configurado"
+        )
     await context.telegram.send_voice(
         context.chat,
         state["audio"],

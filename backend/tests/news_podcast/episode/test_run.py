@@ -22,8 +22,14 @@ from news_podcast.api.episode import service as service_module
 from news_podcast.api.episode.run import EpisodeOutcome
 from news_podcast.api.episode.schemas import EpisodeReport, NewsItem, SelectedStory
 from news_podcast.api.episode.service import EpisodeError, EpisodeService
+from news_podcast.api.lesson import run as lesson_run
 from news_podcast.models import Episode, Feed, PodcastSettings, SettingsMissing
-from tests.news_podcast.factories import SETTINGS, build_settings, create_settings
+from tests.news_podcast.factories import (
+    SETTINGS,
+    build_settings,
+    create_lesson_settings,
+    create_settings,
+)
 from tests.news_podcast.fake_models import fake_factory
 
 # transaction=True: the command closes its connection before writing the history,
@@ -81,6 +87,8 @@ def test_a_run_is_saved_with_its_length_words_and_cost(
     status: Episode.Status,
 ) -> None:
     row = create_settings()
+    # The cron's run reads the lesson's cadence: none, so the news runs alone.
+    create_lesson_settings(every_days=None)
     replace_episode(monkeypatch, tmp_path)
 
     call_command("news_podcast", "episode", *args)
@@ -263,6 +271,7 @@ def test_the_command_makes_the_episode_through_run(
         return EpisodeOutcome(paused=False, sent=send, stories=[], error=None)
 
     monkeypatch.setattr(run, "make_episode", make_episode)
+    monkeypatch.setattr(lesson_run, "make_lesson", lambda *_args, **_options: None)
 
     call_command("news_podcast", "episode", "--scheduled")
     call_command("news_podcast", "episode", "--no-send")

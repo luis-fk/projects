@@ -403,6 +403,7 @@ def test_the_lesson_page_needs_the_permission_before_anything_else(
         ({"min_minutes": 9, "max_minutes": 8}, "max_minutes"),
         ({"review_prompt": "Revise {topico}."}, "review_prompt"),
         ({"voice_model": "openai:gpt-4o-mini-tts"}, "voice_model"),
+        ({"every_days": 0}, "every_days"),
     ],
 )
 def test_the_lesson_form_refuses_a_bad_value_and_keeps_the_row(
@@ -431,6 +432,23 @@ def test_the_lesson_form_saves_a_lesson_of_1_to_9_minutes(admin_client: Client) 
     assert response.status_code == 302
     row.refresh_from_db()
     assert (row.min_minutes, row.max_minutes) == (1, 9)
+
+
+@DATABASES
+@pytest.mark.parametrize(("posted", "saved"), [("2", 2), ("", None)])
+def test_the_lesson_form_saves_a_cadence_or_none(
+    admin_client: Client, posted: str, saved: int | None
+) -> None:
+    row = create_lesson_settings(every_days=5)
+    url = f"{LESSON_URL}{row.pk}/change/"
+
+    page = admin_client.get(url).content.decode()
+    response = admin_client.post(url, form_data(row, every_days=posted))
+
+    assert "A lesson every (days)" in page
+    assert response.status_code == 302
+    row.refresh_from_db()
+    assert row.every_days == saved
 
 
 @DATABASES

@@ -198,6 +198,15 @@ class LessonSettings(models.Model):
     only seed_news_podcast creates; the text models, their prices and the speech
     speed come from PodcastSettings."""
 
+    every_days = models.PositiveSmallIntegerField(
+        "a lesson every (days)",
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text="The cron's run makes one after its episode once this many São Paulo "
+        "days have passed since the latest lesson sent. Blank: no lessons from the "
+        "cron.",
+    )
     min_minutes = models.PositiveSmallIntegerField(
         "minimum minutes",
         validators=[MinValueValidator(1)],

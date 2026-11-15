@@ -125,8 +125,7 @@ def run(
                     built=built,
                     warn=warn(client) if warn else None,
                     telegram=None if sent is None else RecordingTelegram(client, sent),
-                    chat="chat",
-                    admin_chat="admin",
+                    chat="owner",
                     workdir=Path(workdir),
                 )
                 return await run_graph({**INPUTS, "send": send}, context)
@@ -380,7 +379,7 @@ def test_the_time_limit_cancels_the_running_node(
                 client,
                 CATALOG,
                 telegram=RecordingTelegram(client, sent),
-                admin_chat="admin",
+                chat="owner",
             )
             outcome = await run_graph({**INPUTS, "send": True}, context)
         await asyncio.sleep(0)
@@ -398,7 +397,7 @@ def test_the_time_limit_cancels_the_running_node(
     assert cancelled_by_then == [True]
     assert left == 0
     assert sent == [
-        ("admin", failure_message(FAILURE_SUBJECT, "escolha do tema", outcome.error))
+        ("owner", failure_message(FAILURE_SUBJECT, "escolha do tema", outcome.error))
     ]
 
 
@@ -457,7 +456,7 @@ def test_a_sent_lesson_ends_with_its_voice_note_on_telegram(
     assert [part.name for part in parts] == ["voice_001.wav", "voice_002.wav"]
     assert (audio, speed) == (tmp_path / f"aula-{TODAY:%Y-%m-%d}.ogg", 1.0)
     caption = lesson_caption(VETO, outcome.state["pages"])
-    assert sent == [("chat", audio, caption, 546)]
+    assert sent == [("owner", audio, caption, 546)]
     assert [usage.step for usage in outcome.usages] == [
         "choice",
         "pick",
@@ -519,7 +518,7 @@ def test_a_failed_lesson_tells_the_admin_only_when_sending(send: bool) -> None:
     assert outcome.error is not None
     notice = failure_message(FAILURE_SUBJECT, "escolha do tema", outcome.error)
     assert notice.startswith("⚠️ Não consegui gerar a aula de hoje.")
-    assert sent == ([("admin", notice)] if send else [])
+    assert sent == ([("owner", notice)] if send else [])
 
 
 @pytest.mark.parametrize(
@@ -569,4 +568,4 @@ def test_a_voice_failure_fails_the_lesson_at_the_voice_step(
         "voice",
     ]
     assert outcome.state["topic"] == TopicToTry(VETO, STORIES[1])
-    assert [chat for chat, _ in sent] == ["admin"]
+    assert [chat for chat, _ in sent] == ["owner"]

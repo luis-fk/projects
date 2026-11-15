@@ -123,6 +123,7 @@ def test_the_seed_lesson_settings_pass_the_admin_checks() -> None:
     assert (values["min_minutes"], values["max_minutes"]) == (6, 9)
     assert values["voice_model"] == "gemini-3.8-flash-tts"
     assert (values["voice_input_price"], values["voice_output_price"]) == (0.5, 9.0)
+    assert values["every_days"] == 2
 
 
 @pytest.mark.parametrize(("field", "fields"), list(LESSON_PROMPT_FIELDS.items()))

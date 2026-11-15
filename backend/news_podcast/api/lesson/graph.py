@@ -141,7 +141,7 @@ async def run_graph(inputs: LessonState, context: LessonContext) -> LessonOutcom
         if inputs.get("send"):
             await notify_failure(
                 context.telegram,
-                context.admin_chat,
+                context.chat,
                 FAILURE_SUBJECT,
                 progress.step,
                 error,
