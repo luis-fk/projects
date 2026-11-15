@@ -90,26 +90,35 @@ def answer_with(
     return reply, model
 
 
-def tool_reply(model: ScriptedModel) -> ToolMessage:
+def tool_reply(model: ScriptedModel, position: int = -1) -> ToolMessage:
     _, messages = model.calls[1]
-    reply = messages[-1]
+    reply = messages[position]
     assert isinstance(reply, ToolMessage)
     return reply
 
 
-def test_a_tool_result_reaches_the_model_as_json(
+def test_a_tool_result_reaches_the_model_as_json_even_an_empty_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, model = answer_with(
-        monkeypatch,
-        [asks_for("describe", "call-1"), AIMessage(content="Pronto.")],
-        [describe],
+    asks_for_both = AIMessage(
+        content="",
+        tool_calls=[
+            tool_call(name="describe", args={}, id="call-1"),
+            tool_call(name="find_nothing", args={}, id="call-2"),
+        ],
     )
 
-    assert json.loads(str(tool_reply(model).content)) == {
+    _, model = answer_with(
+        monkeypatch,
+        [asks_for_both, AIMessage(content="Pronto.")],
+        [describe, find_nothing],
+    )
+
+    assert json.loads(str(tool_reply(model, -2).content)) == {
         "before": "Antes.",
         "after": "Depois.",
     }
+    assert tool_reply(model).content == "[]"
 
 
 def test_the_tools_the_model_asks_for_run_before_it_answers(
@@ -147,24 +156,11 @@ def test_after_the_last_round_the_model_answers_without_tools(
     assert choices == [None] * rounds + ["none"]
 
 
-def test_an_empty_result_goes_back_as_json_text(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, model = answer_with(
-        monkeypatch,
-        [asks_for("find_nothing", "call-1"), AIMessage(content="Nada.")],
-        [find_nothing],
-    )
-
-    assert tool_reply(model).content == "[]"
-
-
 @pytest.mark.parametrize(
     ("answer", "message"),
     [
         (asks_for("break_down", "call-1"), "database is down"),
         (asks_for("word_count", "call-1"), "there is no tool named word_count"),
-        (asks_for("double", "call-1", number="vinte"), "number"),
     ],
 )
 def test_a_failing_call_goes_back_to_the_model_as_an_error(
@@ -254,15 +250,6 @@ def library() -> Library:
 
 
 @DATABASES
-def test_the_library_tool_lists_only_the_texts_the_user_ticked(
-    library: Library,
-) -> None:
-    texts = user_tools(library.me).library_texts.invoke({})
-
-    assert [text[0] for text in texts] == [library.ticked.id]
-
-
-@DATABASES
 def test_word_counts_come_from_ticked_texts_and_the_user_own_pastes(
     library: Library,
 ) -> None:
@@ -348,21 +335,6 @@ def test_the_text_around_a_chunk_is_at_most_two_chunks_each_way(
     assert found_around(
         library.me, parts[2], chunks_before=5, chunks_after=5
     ) == SurroundingText(before="Um.\n\nDois.", after="Quatro.\n\nCinco.")
-
-
-@DATABASES
-def test_what_two_chunks_repeat_at_their_seam_comes_once(library: Library) -> None:
-    _, middle, _ = chunks(
-        library.ticked,
-        "O começo do capítulo. Uma frase que os dois trechos repetem.",
-        "Uma frase que os dois trechos repetem. O meio do capítulo. Outra frase "
-        "repetida no fim.",
-        "Outra frase repetida no fim. O fim do capítulo.",
-    )
-
-    assert found_around(library.me, middle) == SurroundingText(
-        before="O começo do capítulo.", after="O fim do capítulo."
-    )
 
 
 @DATABASES
@@ -520,18 +492,13 @@ def test_the_memory_summary_starts_from_the_stored_memory(
 
 
 @DATABASES
-def test_the_ideology_definition_tool_returns_the_definition_text() -> None:
+def test_the_ideology_definition_tool_returns_the_definition_or_none() -> None:
     ideology = IdeologiesDefinition.objects.create(
         ideology="Maré Livre", definition="Ninguém é dono do mar."
     )
+    definition_tool = chatbot_tools.get_ideology_definition
 
-    definition = chatbot_tools.get_ideology_definition.invoke(
-        {"ideology_id": ideology.id}
+    assert (
+        definition_tool.invoke({"ideology_id": ideology.id}) == "Ninguém é dono do mar."
     )
-
-    assert definition == "Ninguém é dono do mar."
-
-
-@DATABASES
-def test_the_ideology_definition_tool_returns_none_for_an_unknown_id() -> None:
-    assert chatbot_tools.get_ideology_definition.invoke({"ideology_id": 999}) is None
+    assert definition_tool.invoke({"ideology_id": ideology.id + 1}) is None

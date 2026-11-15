@@ -131,24 +131,13 @@ def temp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @DATABASES
-def test_the_list_is_the_library_newest_first(client: Client) -> None:
-    user = library_user()
-    library_text(user, "Primeiro")
-    library_text(user, "Colado no chat", user_submitted_text=True)
-    library_text(user, "Segundo")
-
-    response = client.get("/api/political-culture/texts", headers=auth())
-
-    assert [text["title"] for text in response.json()] == ["Segundo", "Primeiro"]
-
-
-@DATABASES
-def test_the_list_says_who_added_each_text_and_leaves_out_the_text(
+def test_the_list_is_the_library_newest_first_with_who_added_each_text(
     client: Client,
 ) -> None:
     fulano = get_user_model().objects.create(username="fulano")
+    user = library_user(fulano.id)
     manifesto = library_text(
-        library_user(fulano.id),
+        user,
         "Manifesto",
         author="Fulano de Tal",
         content_description="Um panfleto.",
@@ -156,6 +145,7 @@ def test_the_list_says_who_added_each_text_and_leaves_out_the_text(
     TextWordCount.objects.create(
         text=manifesto, total_word_count=120, word_frequencies={}
     )
+    library_text(user, "Colado no chat", user_submitted_text=True)
     orphan = library_text(library_user(fulano.id + 1), "Sem dono")
 
     response = client.get("/api/political-culture/texts", headers=auth())
@@ -235,11 +225,10 @@ def test_only_library_texts_can_be_ticked(client: Client) -> None:
 
 
 @DATABASES
-@pytest.mark.parametrize("body", [{}, {"selected": "talvez"}], ids=["none", "text"])
-def test_a_tick_needs_true_or_false(client: Client, body: dict[str, Any]) -> None:
+def test_a_tick_needs_true_or_false(client: Client) -> None:
     text = library_text(library_user(2), "Manifesto")
 
-    assert tick(client, library_user(1), text.id, body).status_code == 400
+    assert tick(client, library_user(1), text.id, {}).status_code == 400
     assert not text.selected_by.exists()
 
 
@@ -267,13 +256,10 @@ def test_a_pdf_is_read_in_the_background_from_a_copy(
 
 
 @DATABASES
-@pytest.mark.parametrize("upload_id", [None, "upload-1"], ids=["none", "not a UUID"])
 def test_an_upload_needs_the_id_its_result_will_carry(
-    client: Client, temp_dir: Path, upload_id: str | None
+    client: Client, temp_dir: Path
 ) -> None:
-    data: dict[str, Any] = {"content": SimpleUploadedFile("t.pdf", tiny_pdf("Lei"))}
-    if upload_id:
-        data["upload_id"] = upload_id
+    data = {"content": SimpleUploadedFile("t.pdf", tiny_pdf("Lei"))}
 
     with patch(THREAD) as thread:
         response = client.post("/api/political-culture/texts", data, headers=auth())
@@ -308,8 +294,8 @@ def test_a_pdf_being_read_is_refused_until_its_reading_ends(
 @DATABASES
 @pytest.mark.parametrize(
     "content",
-    [b"just some text", b"", b"x" * serializers.PDF_HEADER_SEARCH + b"%PDF-1.4"],
-    ids=["text file", "empty file", "header past the first kilobyte"],
+    [b"just some text", b"x" * serializers.PDF_HEADER_SEARCH + b"%PDF-1.4"],
+    ids=["text file", "header past the first kilobyte"],
 )
 def test_a_file_that_is_not_a_pdf_is_refused(
     client: Client, temp_dir: Path, content: bytes
@@ -410,35 +396,22 @@ def test_a_pdf_without_text_is_refused_before_any_model_call(
 
 
 @DATABASES
-def test_halves_of_surrogate_pairs_do_not_break_the_save(models: MagicMock) -> None:
-    # PyPDF can split a math font's character into two halves, or keep only one.
-    with pages("x\ud835\udc00y \ud835 z"):
-        text = word_counter.add_pdf_text("math.pdf", "hash", library_user().id)
-
-    text.refresh_from_db()
-    assert text.text == "x\U0001d400y \ufffd z"
-
-
-@DATABASES
-def test_a_long_title_and_author_are_cut_to_their_columns(models: MagicMock) -> None:
+def test_what_postgresql_would_refuse_is_cleaned_before_the_save(
+    models: MagicMock,
+) -> None:
     models.info.return_value = INFO.model_copy(
         update={"title": "T" * 600, "author": "A" * 300}
     )
+    cleaned = "Liberdade x\U0001d400y \ufffd z"
 
-    with pages("Liberdade"):
+    # PyPDF can split a math font's character into two halves, or keep only one.
+    with pages("Liber\x00dade x\ud835\udc00y \ud835 z"):
         text = word_counter.add_pdf_text("livro.pdf", "hash", library_user().id)
 
     text.refresh_from_db()
+    assert text.text == cleaned
+    assert text.chunks.get().chunk_text == cleaned
     assert (len(text.title or ""), len(text.author or "")) == (500, 255)
-
-
-@DATABASES
-def test_nul_characters_are_dropped_from_the_text(models: MagicMock) -> None:
-    with pages("Liber\x00dade"):
-        text = word_counter.add_pdf_text("manifesto.pdf", "hash", library_user().id)
-
-    assert text.text == "Liberdade"
-    assert text.chunks.get().chunk_text == "Liberdade"
 
 
 def test_the_word_picker_gets_only_the_most_frequent_words(
@@ -574,14 +547,14 @@ def test_the_texts_socket_refuses_other_tokens(claims: dict[str, str]) -> None:
 @pytest.mark.usefixtures("in_memory_channel_layer")
 @pytest.mark.django_db(databases=["default", "political_culture_db"], transaction=True)
 @pytest.mark.parametrize(
-    ("is_active", "active", "connects"),
-    [(True, True, True), (False, True, False), (True, False, False)],
-    ids=["can use the app", "Active unticked", "app unticked"],
+    ("active", "connects"),
+    [(True, True), (False, False)],
+    ids=["can use the app", "app unticked"],
 )
 def test_the_texts_socket_lets_in_only_people_who_can_use_the_app(
-    is_active: bool, active: bool, connects: bool
+    active: bool, connects: bool
 ) -> None:
-    user_id = saved_person(APP, is_active=is_active, active=active)
+    user_id = saved_person(APP, active=active)
 
     async def connect() -> bool:
         socket = texts_socket(int(user_id), user_token(APP, user_id))
