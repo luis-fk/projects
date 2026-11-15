@@ -135,30 +135,39 @@ async def run_lesson(
     model_factory: ModelFactory,
 ) -> LessonOutcome:
     """Runs the graph with clients built inside this run, so its waits, model marks
-    and connections are its own, and a workdir that outlives the voice's parts."""
+    and connections are its own, and a workdir that outlives the voice's parts. A
+    failure while they close, once the lesson ended, leaves its outcome as it was."""
     send = bool(inputs.get("send"))
-    async with httpx.AsyncClient() as http_client, search_client() as search:
-        telegram = telegram_client(http_client)
-        admin_chat = admin_chat_id()
-        with tempfile.TemporaryDirectory(prefix="news_podcast_lesson_") as workdir:
-            context = LessonContext(
-                options=options,
-                catalog=tuple(catalog),
-                today=datetime.now(LOCAL_TZ).date(),
-                text=TextModels(
-                    text_models, progress.usages, http_client, model_factory
-                ),
-                progress=progress,
-                search=search,
-                warn=admin_warner(telegram, admin_chat) if send else log_warning,
-                http_client=http_client,
-                telegram=telegram,
-                chat=chat_id(),
-                admin_chat=admin_chat,
-                workdir=Path(workdir),
-                voice_waits=list(VOICE_RETRY_MINUTES),
-            )
-            return await run_graph(inputs, context)
+    outcome: LessonOutcome | None = None
+    try:
+        async with httpx.AsyncClient() as http_client, search_client() as search:
+            telegram = telegram_client(http_client)
+            admin_chat = admin_chat_id()
+            with tempfile.TemporaryDirectory(prefix="news_podcast_lesson_") as workdir:
+                context = LessonContext(
+                    options=options,
+                    catalog=tuple(catalog),
+                    today=datetime.now(LOCAL_TZ).date(),
+                    text=TextModels(
+                        text_models, progress.usages, http_client, model_factory
+                    ),
+                    progress=progress,
+                    search=search,
+                    warn=admin_warner(telegram, admin_chat) if send else log_warning,
+                    http_client=http_client,
+                    telegram=telegram,
+                    chat=chat_id(),
+                    admin_chat=admin_chat,
+                    workdir=Path(workdir),
+                    voice_waits=list(VOICE_RETRY_MINUTES),
+                )
+                outcome = await run_graph(inputs, context)
+                return outcome
+    except Exception:
+        if outcome is None:
+            raise
+        logger.exception("The lesson ended, but closing its clients failed")
+        return outcome
 
 
 @asynccontextmanager

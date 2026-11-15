@@ -1,5 +1,7 @@
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
 from typing import Any
@@ -561,11 +563,12 @@ def test_a_failed_write_that_is_not_a_deleted_topic_reaches_the_caller(
 
 
 class LateEvening:
-    """23:30 in São Paulo on 2026-11-14, already 02:30 on the 15th in UTC."""
+    """23:30 in São Paulo on 2026-03-09, already 02:30 on the 10th in UTC: a day
+    that is not today, so a clock that skips this one can't pass."""
 
     @staticmethod
     def now(tz: tzinfo) -> datetime:
-        return datetime(2026, 11, 15, 2, 30, tzinfo=UTC).astimezone(tz)
+        return datetime(2026, 3, 10, 2, 30, tzinfo=UTC).astimezone(tz)
 
 
 @DATABASE
@@ -580,7 +583,7 @@ def test_a_late_evening_lesson_takes_its_sao_paulo_date(
     lesson_run.make_lesson([], send=False, news_sent=False)
 
     [(context, _)] = seen
-    assert context.today == date(2026, 11, 14)
+    assert context.today == date(2026, 3, 9)
 
 
 @DATABASE
@@ -880,3 +883,26 @@ def test_without_sending_a_settings_failure_only_fails_the_command(
 
     assert world.sent == []
     assert not Episode.objects.exists()
+
+
+@asynccontextmanager
+async def closing_fails() -> AsyncIterator[None]:
+    yield None
+    raise RuntimeError("o cliente do Tavily não fechou")
+
+
+@DATABASE
+def test_a_client_that_fails_to_close_after_the_lesson_keeps_its_outcome(
+    monkeypatch: pytest.MonkeyPatch, world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    create_settings()
+    create_lesson_settings()
+    capture_run(monkeypatch)
+    monkeypatch.setattr(lesson_run, "search_client", closing_fails)
+
+    error = lesson_run.make_lesson([], send=True, news_sent=False)
+
+    assert error is None
+    assert Episode.objects.get().status == Episode.Status.SENT
+    assert world.sent == []
+    assert "o cliente do Tavily não fechou" in caplog.text
