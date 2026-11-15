@@ -114,7 +114,7 @@ SENT = EpisodeOutcome(paused=False, sent=True, stories=STORIES, error=None)
 
 
 @pytest.mark.parametrize(("args", "send"), [([], True), (["--no-send"], False)])
-def test_a_run_by_hand_makes_no_lesson(
+def test_a_run_without_scheduled_makes_no_lesson(
     monkeypatch: pytest.MonkeyPatch, args: list[str], send: bool
 ) -> None:
     calls = record_runs(monkeypatch, SENT)

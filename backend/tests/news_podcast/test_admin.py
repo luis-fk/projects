@@ -445,7 +445,8 @@ def test_the_lesson_form_saves_a_cadence_or_none(
     page = admin_client.get(url).content.decode()
     response = admin_client.post(url, form_data(row, every_days=posted))
 
-    assert "A lesson every (days)" in page
+    # First in the Lesson section, before the minutes.
+    assert -1 < page.find("A lesson every (days)") < page.find("Minimum minutes")
     assert response.status_code == 302
     row.refresh_from_db()
     assert row.every_days == saved

@@ -360,7 +360,7 @@ def test_without_an_admin_chat_the_lesson_goes_to_the_episode_chat(
 
 class RefusingMessages(RecordingTelegram):
     async def send_message(self, chat_id: str, text: str) -> None:
-        raise TelegramError("bot bloqueado no chat do admin")
+        raise TelegramError("o Telegram respondeu 502")
 
 
 @DATABASE
@@ -381,7 +381,7 @@ def test_a_refused_warning_is_logged_and_the_lesson_still_goes_out(
     error = make(STORIES, LESSON_ANSWERS)
 
     assert error is None
-    assert "bot bloqueado no chat do admin" in caplog.text
+    assert "o Telegram respondeu 502" in caplog.text
     assert [entry[0] for entry in world.sent] == ["admin"]
     assert Episode.objects.get().status == Episode.Status.SENT
 
@@ -958,6 +958,7 @@ D_EVENING = datetime(2026, 3, 10, 2, 30, tzinfo=UTC)
 # The cron's 06:40 in São Paulo on D+1 and D+2.
 D1_MORNING = datetime(2026, 3, 10, 9, 40, tzinfo=UTC)
 D2_MORNING = datetime(2026, 3, 11, 9, 40, tzinfo=UTC)
+D3_MORNING = datetime(2026, 3, 12, 9, 40, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -1012,6 +1013,29 @@ def test_with_a_lesson_every_two_days_only_the_second_day_makes_one(
     run_at(D2_MORNING + timedelta(hours=1))
     assert len(seen) == 1
     assert Episode.objects.filter(status=Episode.Status.NOT_SENT).count() == 1
+
+
+@DATABASE
+@pytest.mark.parametrize(
+    ("every_days", "runs_at", "made"),
+    [(1, D1_MORNING, 1), (3, D2_MORNING, 0), (3, D3_MORNING, 1)],
+)
+def test_the_cron_follows_the_cadence_saved_in_lesson_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    every_days: int,
+    runs_at: datetime,
+    made: int,
+) -> None:
+    create_settings()
+    create_lesson_settings(every_days=every_days)
+    create_lesson_row(started_at=D_EVENING)
+    seen = capture_run(monkeypatch)
+    monkeypatch.setattr(lesson_run, "datetime", clock(runs_at))
+
+    lesson_run.make_lesson([], send=False, news_sent=True, scheduled=True)
+
+    assert len(seen) == made
 
 
 @DATABASE
@@ -1204,7 +1228,7 @@ def test_with_a_blank_cadence_the_cron_sends_only_the_news(
 
 
 @DATABASE
-def test_a_run_by_hand_makes_no_lesson_even_when_one_is_due(
+def test_a_run_without_scheduled_makes_no_lesson_even_when_one_is_due(
     monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
 ) -> None:
     create_settings()

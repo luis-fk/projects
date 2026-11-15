@@ -180,8 +180,8 @@ async def run_lesson(
     try:
         async with httpx.AsyncClient() as http_client, search_client() as search:
             telegram = telegram_client(http_client)
-            # The lessons go to the owner's chat, with the notices, and not to the
-            # episode's group (the owner's choice).
+            # The lessons go where the notices go, the owner's chat, rather than to
+            # the episode's group (the owner's choice).
             chat = admin_chat_id()
             with tempfile.TemporaryDirectory(prefix="news_podcast_lesson_") as workdir:
                 context = LessonContext(
