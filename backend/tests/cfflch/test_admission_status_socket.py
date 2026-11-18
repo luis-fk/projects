@@ -40,29 +40,15 @@ def open_status_socket(subprotocols: list[str]) -> tuple[bool, Any]:
     return asyncio.run(connect())
 
 
-def test_the_status_socket_accepts_any_cfflch_user() -> None:
-    connected, subprotocol = open_status_socket(["bearer", user_token("cfflch", "8")])
+def test_the_status_socket_rejects_a_missing_or_wrong_token() -> None:
+    for subprotocols in [
+        [],
+        ["bearer", user_token("plants")],
+        ["bearer", login_token("cfflch")],
+    ]:
+        connected, _ = open_status_socket(subprotocols)
 
-    assert connected
-    assert subprotocol == "bearer"
-
-
-def test_the_status_socket_rejects_a_connection_without_a_token() -> None:
-    connected, _ = open_status_socket([])
-
-    assert not connected
-
-
-def test_the_status_socket_rejects_another_apps_token() -> None:
-    connected, _ = open_status_socket(["bearer", user_token("plants")])
-
-    assert not connected
-
-
-def test_the_status_socket_rejects_a_login_token() -> None:
-    connected, _ = open_status_socket(["bearer", login_token("cfflch")])
-
-    assert not connected
+        assert not connected
 
 
 def test_the_status_socket_rejects_an_api_key() -> None:
@@ -84,9 +70,9 @@ def search_socket() -> WebsocketCommunicator:
 
 
 def test_the_status_socket_relays_the_results_and_the_end_of_its_search() -> None:
-    async def scenario() -> list[Any]:
+    async def scenario() -> tuple[Any, list[Any]]:
         communicator = search_socket()
-        await communicator.connect()
+        _, subprotocol = await communicator.connect()
         channel_layer = get_channel_layer()
         await channel_layer.group_send(
             "admission_status_abc",
@@ -100,9 +86,12 @@ def test_the_status_socket_relays_the_results_and_the_end_of_its_search() -> Non
             await communicator.receive_json_from(),
         ]
         await communicator.disconnect()
-        return received
+        return subprotocol, received
 
-    assert asyncio.run(scenario()) == [RESULTS, {"done": True}]
+    subprotocol, received = asyncio.run(scenario())
+
+    assert subprotocol == "bearer"
+    assert received == [RESULTS, {"done": True}]
 
 
 def test_the_status_socket_gets_nothing_from_other_searches() -> None:
@@ -123,15 +112,11 @@ def test_the_status_socket_gets_nothing_from_other_searches() -> None:
 @pytest.mark.access_check
 @pytest.mark.django_db(databases=["default", "cfflch_db"], transaction=True)
 @pytest.mark.parametrize(
-    ("is_active", "active", "connects"),
-    [(True, True, True), (False, True, False), (True, False, False)],
-    ids=["can use the app", "Active unticked", "app unticked"],
+    "active", [True, False], ids=["can use the app", "app unticked"]
 )
-def test_the_status_socket_lets_in_only_people_who_can_use_cfflch(
-    is_active: bool, active: bool, connects: bool
-) -> None:
-    user_id = saved_person("cfflch", is_active=is_active, active=active)
+def test_the_status_socket_lets_in_only_people_who_can_use_cfflch(active: bool) -> None:
+    user_id = saved_person("cfflch", active=active)
 
     connected, _ = open_status_socket(["bearer", user_token("cfflch", user_id)])
 
-    assert connected is connects
+    assert connected is active

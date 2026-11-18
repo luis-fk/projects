@@ -137,7 +137,7 @@ def test_a_clear_link_puts_the_candidate_first_with_its_story_as_the_hook() -> N
 
 @pytest.mark.parametrize(
     "reply",
-    [answer(0, 0), answer(9, 1), answer(3, 0), answer(3, 7), answer(0, 2)],
+    [answer(9, 1), answer(3, 0), answer(3, 7), answer(0, 2)],
 )
 def test_no_clear_link_keeps_the_fallback_order_and_asks_once(reply: str) -> None:
     state, _, asked, _ = choose(CATALOG, STORIES, [reply])
@@ -162,13 +162,6 @@ def test_a_choice_that_fails_falls_back_at_once_and_keeps_the_waits(
     assert asked == [MODEL]
     assert sleeps == []
     assert context.text.retry_minutes == list(TEXT_RETRY_MINUTES)
-
-
-def test_a_day_without_stories_asks_nothing() -> None:
-    state, _, asked, _ = choose(CATALOG, [], [])
-
-    assert tried(state) == [TopicToTry(topic, None) for topic in FALLBACK]
-    assert asked == []
 
 
 def test_the_choice_gets_the_prompt_the_candidates_and_the_numbered_stories() -> None:

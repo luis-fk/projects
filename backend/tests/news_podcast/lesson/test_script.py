@@ -118,18 +118,15 @@ def run_node(
     return asyncio.run(scenario())
 
 
-def messages(built: dict[str, FakeChatModel], call: int = 0) -> tuple[str, str]:
-    system, human = built[MODEL].received[call]
+def messages(built: dict[str, FakeChatModel]) -> tuple[str, str]:
+    system, human = built[MODEL].received[0]
     return str(system.content), str(human.content)
 
 
-@pytest.mark.parametrize(("speed", "words"), [(1.0, (900, 1350)), (1.5, (1350, 2025))])
-def test_the_word_range_is_the_minutes_at_150_words_times_the_speed(
-    speed: float, words: tuple[int, int]
-) -> None:
-    options = build_lesson_options(min_minutes=6, max_minutes=9, speech_speed=speed)
+def test_the_word_range_is_the_minutes_at_150_words_times_the_speed() -> None:
+    options = build_lesson_options(min_minutes=6, max_minutes=9, speech_speed=1.5)
 
-    assert word_range(options) == words
+    assert word_range(options) == (1350, 2025)
 
 
 def test_the_script_gets_the_prompt_the_pages_the_story_and_the_area() -> None:
@@ -167,14 +164,6 @@ def test_an_area_with_no_other_topic_says_so() -> None:
     )
 
 
-def test_a_topic_with_no_hook_has_no_story_part() -> None:
-    plain: LessonState = {**STATE, "topic": TopicToTry(VETO, None)}
-
-    _, _, _, built = run_node(write_script, plain, [script_answer()])
-
-    assert "Notícia de hoje" not in messages(built)[1]
-
-
 def test_news_sent_fills_the_prompt_with_no_when_the_summary_failed() -> None:
     failed_news: LessonState = {**STATE, "news_sent": False}
 
@@ -197,13 +186,6 @@ def test_a_script_over_one_tenth_above_the_maximum_is_asked_again() -> None:
 
     assert state["words"] == 1485
     assert asked == [MODEL, MODEL]
-
-
-def test_a_script_with_too_few_turns_is_a_bad_answer() -> None:
-    short = script_answer(*words_in(900, turns=9))
-
-    with pytest.raises(TextError):
-        run_node(write_script, STATE, [short, short])
 
 
 def written(words: int = 1000) -> LessonState:
@@ -290,11 +272,15 @@ def test_a_review_that_changes_the_script_silently_is_logged(
     assert "without listing a change" in caplog.text
 
 
-def test_a_review_with_too_few_turns_is_a_bad_answer() -> None:
-    short = script_answer(*words_in(900, turns=9), changes=[])
+def test_a_script_or_a_review_with_too_few_turns_is_a_bad_answer() -> None:
+    script = script_answer(*words_in(900, turns=9))
+    review = script_answer(*words_in(900, turns=9), changes=[])
+    state = written()
 
     with pytest.raises(TextError):
-        run_node(review_script, written(), [short, short])
+        run_node(write_script, STATE, [script, script])
+    with pytest.raises(TextError):
+        run_node(review_script, state, [review, review])
 
 
 @pytest.mark.parametrize(

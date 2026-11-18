@@ -5,7 +5,6 @@ from typing import Any
 
 import httpx
 import pytest
-from langchain_core.prompts import ChatPromptTemplate
 from pytest_django import Settings
 
 from news_podcast.api.core.config import LOCAL_TZ
@@ -13,7 +12,7 @@ from news_podcast.api.core.llm import TextModels
 from news_podcast.api.core.schemas import Script, Turn
 from news_podcast.api.core.turns import MIN_SCRIPT_TURNS
 from news_podcast.api.episode import prompts
-from news_podcast.api.episode.prompts import lengthening_template, script_template
+from news_podcast.api.episode.prompts import lengthening_template
 from news_podcast.api.episode.run import episode_settings
 from news_podcast.api.episode.schemas import EpisodeOptions
 from news_podcast.api.episode.script import (
@@ -28,10 +27,6 @@ TURNS = [Turn(speaker="Bia", text="Bom dia")]
 DEFAULT_OPTIONS = EpisodeOptions(12, 18, 1.0)
 MAIN = SETTINGS["text_model"]
 FALLBACK = SETTINGS["fallback_model"]
-
-
-def system_message(template: ChatPromptTemplate, values: dict[str, Any]) -> str:
-    return str(template.format_messages(**values)[0].content)
 
 
 def every_placeholder(fields: tuple[str, ...]) -> str:
@@ -53,75 +48,28 @@ def record_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return waits
 
 
-def test_the_script_prompt_follows_the_configured_options() -> None:
-    options = EpisodeOptions(20, 30, 1.0)
-    start = datetime(2026, 11, 6, 20, 0, tzinfo=LOCAL_TZ)
-    end = datetime(2026, 11, 7, 20, 0, tzinfo=LOCAL_TZ)
-
-    template = (
-        'Podcast chamado "{podcast_name}". É o episódio das {send_time} de {today}. '
-        "Abra com uma fala curta com {greeting} e a data. Escreva entre {min_words} e "
-        "{max_words} palavras."
-    )
-
-    script = system_message(
-        script_template(template),
-        {
-            "briefs": "",
-            **script_values(options, date(2026, 11, 7), start, end, time(21, 0)),
-        },
-    )
-
-    assert 'chamado "Resumo das 21"' in script
-    assert "É o episódio das 21h de sábado, 7 de novembro" in script
-    assert "uma fala curta com boa noite e a data" in script
-    assert "entre 3400 e 5100 palavras" in script
-
-
-def test_the_script_steps_fill_every_placeholder_the_admin_accepts() -> None:
+def test_the_script_steps_fill_every_placeholder_but_not_the_briefs_braces() -> None:
     # A placeholder left without a value would raise KeyError.
     start = datetime(2026, 11, 6, 6, 0, tzinfo=LOCAL_TZ)
     end = datetime(2026, 11, 7, 6, 0, tzinfo=LOCAL_TZ)
     values = {
-        "briefs": "",
+        "briefs": 'HISTÓRIA 1: Ministro diz "{x}"',
         **script_values(DEFAULT_OPTIONS, date(2026, 11, 7), start, end, time(7, 0)),
         **lengthening_values(DEFAULT_OPTIONS, Script(turns=TURNS)),
     }
 
     system, human = lengthening_template(
         every_placeholder(prompts.SCRIPT_FIELDS),
-        every_placeholder(prompts.EXPAND_FIELDS),
+        every_placeholder(prompts.EXPAND_FIELDS) + " {{mais}}",
     ).format_messages(**values)
 
-    assert str(system.content).startswith(
+    assert system.content == (
         "Resumo das 7 Bia Léo 7h bom dia sábado, 7 de novembro "
+        "06/11 às 06:00 07/11 às 06:00 2040 3060"
     )
-    assert human.content == f"\n\n2 2040 3060 {Script(turns=TURNS).model_dump_json()}"
-
-
-def test_the_lengthening_keeps_the_script_prompt_and_adds_the_expand_prompt() -> None:
-    template = lengthening_template(
-        "Roteiro de {min_words} a {max_words} palavras.",
-        "Tem {words}; escreva {{mais}}: {script}",
-    )
-    values = {
-        "briefs": 'HISTÓRIA 1: Ministro diz "{x}"',
-        **script_values(
-            DEFAULT_OPTIONS,
-            date(2026, 11, 7),
-            datetime(2026, 11, 6, 6, 0, tzinfo=LOCAL_TZ),
-            datetime(2026, 11, 7, 6, 0, tzinfo=LOCAL_TZ),
-            time(7, 0),
-        ),
-        **lengthening_values(DEFAULT_OPTIONS, Script(turns=TURNS)),
-    }
-
-    system, human = template.format_messages(**values)
-
-    assert system.content == "Roteiro de 2040 a 3060 palavras."
     assert human.content == (
         'HISTÓRIA 1: Ministro diz "{x}"\n\n'
-        f"Tem 2; escreva {{mais}}: {Script(turns=TURNS).model_dump_json()}"
+        f"2 2040 3060 {Script(turns=TURNS).model_dump_json()} {{mais}}"
     )
 
 

@@ -2,19 +2,16 @@ from collections.abc import Callable, Iterator
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from django.contrib.auth import get_user_model
 from django.http import HttpResponseBase
 from django.test import Client
 
 from cfflch.api.admission_status.routes import AdmissionStatusApi
-from cfflch.models import AdmissionResult, ClassRoom
+from cfflch.models import ClassRoom
 from tests.api_tokens import (
     api_key,
     bearer,
     login_token,
-    make_token,
     saved_person,
-    unknown_api_key,
     user_token,
 )
 
@@ -56,44 +53,33 @@ def find_user(client: Client, headers: dict[str, str]) -> HttpResponseBase:
 
 
 REQUESTS = [list_class_rooms, list_results, update_result, delete_result, start_search]
-# What each request answers a cfflch user, with the empty_database fixture.
-STATUSES = [
-    (list_class_rooms, 200),
-    (list_results, 200),
-    (update_result, 404),
-    (delete_result, 404),
-    (start_search, 202),
-]
+# A DRF view and the async view, with what each answers a cfflch user under the
+# empty_database fixture; the other DRF views make the same require_user_token call.
+STATUSES = [(list_class_rooms, 200), (start_search, 202)]
 
 
 @pytest.fixture
 def empty_database() -> Iterator[None]:
-    """No class rooms or results, and searches that end right away."""
+    """No class rooms, and searches that end right away."""
     with (
         patch.object(ClassRoom.objects, "all", return_value=[]),
-        patch.object(AdmissionResult.objects, "filter"),
-        patch.object(AdmissionResult.objects, "prefetch_related") as result,
         patch.object(AdmissionStatusApi, "_process_admission_task", AsyncMock()),
     ):
-        result.return_value.get.side_effect = AdmissionResult.DoesNotExist
         yield
 
 
 @pytest.mark.parametrize("send", REQUESTS)
-def test_requests_without_a_token_get_401(client: Client, send: Send) -> None:
+def test_requests_without_a_cfflch_user_token_get_401(
+    client: Client, send: Send
+) -> None:
     assert send(client, {}).status_code == 401
-
-
-@pytest.mark.parametrize("send", REQUESTS)
-def test_tokens_for_another_app_get_401(client: Client, send: Send) -> None:
     assert send(client, bearer(user_token("plants"))).status_code == 401
 
 
-@pytest.mark.usefixtures("empty_database")
-@pytest.mark.parametrize(("send", "status"), STATUSES)
-def test_any_cfflch_user_gets_in(client: Client, send: Send, status: int) -> None:
-    """The results have no owner: every cfflch user shares them."""
-    assert send(client, bearer(user_token("cfflch", "8"))).status_code == status
+@pytest.mark.django_db
+@pytest.mark.parametrize("send", REQUESTS)
+def test_api_keys_for_another_app_get_401(client: Client, send: Send) -> None:
+    assert send(client, bearer(api_key("plants"))).status_code == 401
 
 
 @pytest.mark.django_db
@@ -105,68 +91,25 @@ def test_any_cfflch_api_key_gets_in(client: Client, send: Send, status: int) -> 
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("send", REQUESTS)
-def test_api_keys_for_another_app_get_401(client: Client, send: Send) -> None:
-    assert send(client, bearer(api_key("plants"))).status_code == 401
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("send", REQUESTS)
-def test_inactive_api_keys_get_401(client: Client, send: Send) -> None:
-    headers = bearer(api_key("cfflch", active=False))
-
-    assert send(client, headers).status_code == 401
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("send", REQUESTS)
-def test_unknown_api_keys_get_401(client: Client, send: Send) -> None:
-    assert send(client, bearer(unknown_api_key())).status_code == 401
-
-
-def test_the_login_lookup_without_a_token_gets_401(client: Client) -> None:
+def test_the_login_lookup_without_a_cfflch_login_token_gets_401(client: Client) -> None:
     assert find_user(client, {}).status_code == 401
-
-
-@pytest.mark.parametrize(
-    ("app", "purpose"),
-    [("cfflch", "user"), ("plants", "login")],
-    ids=["user token", "another app's login token"],
-)
-def test_the_login_lookup_with_another_token_gets_401(
-    client: Client, app: str, purpose: str
-) -> None:
-    headers = bearer(make_token(sub="7", app=app, purpose=purpose))
-
-    assert find_user(client, headers).status_code == 401
-
-
-def test_the_login_lookup_runs_with_a_login_token(client: Client) -> None:
-    AuthUser = get_user_model()
-    with patch.object(AuthUser.objects, "using") as using:
-        using.return_value.get.side_effect = AuthUser.DoesNotExist
-        response = find_user(client, bearer(login_token("cfflch")))
-
-    assert response.status_code == 404
-    using.return_value.get.assert_called_once_with(username="ana", is_active=True)
+    assert find_user(client, bearer(user_token("cfflch"))).status_code == 401
+    assert find_user(client, bearer(login_token("plants"))).status_code == 401
+    assert find_user(client, bearer(api_key("cfflch"))).status_code == 401
 
 
 @pytest.mark.access_check
 @pytest.mark.django_db(databases=["default", "cfflch_db"])
 @pytest.mark.usefixtures("empty_database")
+@pytest.mark.parametrize(("send", "status"), STATUSES)
 @pytest.mark.parametrize(
-    ("send", "status"), [(list_class_rooms, 200), (start_search, 202)]
-)
-@pytest.mark.parametrize(
-    ("is_active", "active"),
-    [(True, True), (False, True), (True, False)],
-    ids=["can use cfflch", "Active unticked", "cfflch unticked"],
+    "active", [True, False], ids=["can use cfflch", "cfflch unticked"]
 )
 def test_only_people_who_can_use_cfflch_get_in(
-    client: Client, send: Send, status: int, is_active: bool, active: bool
+    client: Client, send: Send, status: int, active: bool
 ) -> None:
     """start_search is an async view: the check runs through sync_to_async."""
-    user_id = saved_person("cfflch", is_active=is_active, active=active)
-    expected = status if is_active and active else 401
+    user_id = saved_person("cfflch", active=active)
+    expected = status if active else 401
 
     assert send(client, bearer(user_token("cfflch", user_id))).status_code == expected

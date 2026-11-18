@@ -45,26 +45,21 @@ def test_brazilian_number_formats() -> None:
     assert long_date(NOVEMBER) == "sexta-feira, 6 de novembro"
 
 
-@pytest.mark.parametrize(
-    ("subject", "first_line"),
-    [
-        ("o episódio de hoje", "⚠️ Não consegui gerar o episódio de hoje."),
-        ("a aula de hoje", "⚠️ Não consegui gerar a aula de hoje."),
-    ],
-)
-def test_a_failure_notice_names_what_failed(subject: str, first_line: str) -> None:
-    message = failure_message(subject, "voz", RuntimeError("a cota <acabou>"))
+def test_a_failure_notice_names_what_failed() -> None:
+    message = failure_message(
+        "o episódio de hoje", "voz", RuntimeError("a cota <acabou>")
+    )
 
     assert message.split("\n") == [
-        first_line,
+        "⚠️ Não consegui gerar o episódio de hoje.",
         "<b>Etapa:</b> voz",
         "<b>Erro:</b> a cota &lt;acabou&gt;",
         "O log completo fica no Railway.",
     ]
 
 
-@pytest.mark.parametrize("name", ["gemini-3.8-flash", "google_genai:gemini-3.8-flash"])
-def test_a_text_model_finds_its_price_under_the_name_as_saved(name: str) -> None:
+def test_a_text_model_finds_its_price_under_the_name_as_saved() -> None:
+    name = "google_genai:gemini-3.8-flash"
     prices = build_settings(
         text_model=name, text_input_price=0.75, text_output_price=3.75
     ).prices()

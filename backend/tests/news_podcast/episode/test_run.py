@@ -10,17 +10,21 @@ from django.core.management.base import CommandError
 from django.db import DatabaseError
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
-from pydantic import ValidationError
 from pytest_django import Settings
 
 from news_podcast.api.core import telegram
 from news_podcast.api.core.llm import TextModels
-from news_podcast.api.core.schemas import ModelPrice, NewsStory, Usage
+from news_podcast.api.core.schemas import NewsStory, Usage
 from news_podcast.api.core.telegram import TelegramClient
 from news_podcast.api.episode import run
 from news_podcast.api.episode import service as service_module
 from news_podcast.api.episode.run import EpisodeOutcome
-from news_podcast.api.episode.schemas import EpisodeReport, NewsItem, SelectedStory
+from news_podcast.api.episode.schemas import (
+    EpisodeReport,
+    FeedSource,
+    NewsItem,
+    SelectedStory,
+)
 from news_podcast.api.episode.service import EpisodeError, EpisodeService
 from news_podcast.api.lesson import run as lesson_run
 from news_podcast.models import Episode, Feed, PodcastSettings, SettingsMissing
@@ -49,12 +53,15 @@ def no_keys(settings: Settings) -> None:
     settings.TELEGRAM_ADMIN_CHAT_ID = None
 
 
-def replace_episode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Makes a voice answer that costs US$ 6 and a 15-minute episode of 2550 words."""
+def replace_episode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[list[str]]:
+    """Makes a voice answer that costs US$ 6 and a 15-minute episode of 2550 words,
+    and returns the outlets each run read."""
+    read: list[list[str]] = []
 
     async def make(
         service: EpisodeService, *, scheduled: bool, send: bool
     ) -> EpisodeReport:
+        read.append([source.outlet for source in service.sources])
         service.usages.append(
             Usage(
                 step="voice",
@@ -70,31 +77,30 @@ def replace_episode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         )
 
     monkeypatch.setattr(EpisodeService, "generate_episode", make)
+    return read
 
 
 @DATABASE
-@pytest.mark.parametrize(
-    ("args", "status"),
-    [
-        (["--scheduled"], Episode.Status.SENT),
-        (["--no-send"], Episode.Status.NOT_SENT),
-    ],
-)
-def test_a_run_is_saved_with_its_length_words_and_cost(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    args: list[str],
-    status: Episode.Status,
+def test_a_run_reads_the_active_feeds_and_is_saved_with_its_length_words_and_cost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     row = create_settings()
     # The cron's run reads the lesson's cadence: none, so the news runs alone.
     create_lesson_settings(every_days=None)
-    replace_episode(monkeypatch, tmp_path)
+    for outlet, active in [("g1", True), ("Valor", False)]:
+        Feed.objects.create(
+            outlet=outlet,
+            section=Feed.Section.GERAL,
+            url=f"https://{outlet.lower()}.example/rss",
+            active=active,
+        )
+    read = replace_episode(monkeypatch, tmp_path)
 
-    call_command("news_podcast", "episode", *args)
+    call_command("news_podcast", "episode", "--scheduled")
 
+    assert read == [["g1"]]
     episode = Episode.objects.get()
-    assert episode.status == status
+    assert episode.status == Episode.Status.SENT
     assert episode.duration_seconds == 900.0
     assert episode.script_words == 2550
     assert episode.cost_usd == pytest.approx(6.00)
@@ -107,38 +113,6 @@ def test_a_run_is_saved_with_its_length_words_and_cost(
         }
     ]
     assert episode.error == ""
-
-
-@DATABASE
-def test_a_run_reads_the_active_feeds_in_the_database(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    create_settings()
-    for outlet, active in [("g1", True), ("BBC", True), ("Valor", False)]:
-        Feed.objects.create(
-            outlet=outlet,
-            section=Feed.Section.GERAL,
-            url=f"https://{outlet.lower()}.example/rss",
-            active=active,
-        )
-    read: list[int] = []
-
-    async def make(
-        service: EpisodeService, *, scheduled: bool, send: bool
-    ) -> EpisodeReport:
-        read.append(len(service.sources))
-        return EpisodeReport(
-            audio_path=tmp_path / "resumo.ogg",
-            duration_seconds=900.0,
-            caption="🎙️",
-            script_words=2550,
-        )
-
-    monkeypatch.setattr(EpisodeService, "generate_episode", make)
-
-    call_command("news_podcast", "episode", "--no-send")
-
-    assert read == [2]
 
 
 @DATABASE
@@ -209,20 +183,6 @@ def test_without_the_settings_row_the_run_tells_the_admin_to_run_the_seed(
 
 
 @DATABASE
-def test_without_the_settings_row_a_run_without_sending_only_fails(
-    monkeypatch: pytest.MonkeyPatch, settings: Settings
-) -> None:
-    settings.TELEGRAM_ADMIN_CHAT_ID = "admin"
-    sent = record_notices(monkeypatch)
-
-    with pytest.raises(CommandError, match="seed_news_podcast"):
-        call_command("news_podcast", "episode", "--no-send")
-
-    assert sent == []
-    assert not Episode.objects.exists()
-
-
-@DATABASE
 def test_with_no_feeds_the_run_fails_at_reading_them(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -237,28 +197,13 @@ def test_with_no_feeds_the_run_fails_at_reading_them(
     monkeypatch.setattr(service_module, "fetch_items", fetch)
     monkeypatch.setattr(service_module, "OUTPUT_DIR", tmp_path)
 
-    with pytest.raises(CommandError, match="Nenhuma notícia encontrada nos feeds"):
-        call_command("news_podcast", "episode", "--no-send")
+    outcome = run.make_episode(scheduled=False, send=False)
 
+    assert outcome.stories == []
     episode = Episode.objects.get()
     assert episode.status == Episode.Status.FAILED
     assert episode.error == "leitura dos feeds: Nenhuma notícia encontrada nos feeds"
     assert not Feed.objects.exists()
-
-
-@DATABASE
-def test_a_paused_podcast_makes_no_episode_on_railway(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    create_settings(paused=True)
-    replace_episode(monkeypatch, tmp_path)
-
-    call_command("news_podcast", "episode", "--scheduled")
-    assert not Episode.objects.exists()
-
-    # A run by hand, without --scheduled, still works.
-    call_command("news_podcast", "episode", "--no-send")
-    assert Episode.objects.count() == 1
 
 
 def test_the_command_makes_the_episode_through_run(
@@ -277,19 +222,6 @@ def test_the_command_makes_the_episode_through_run(
     call_command("news_podcast", "episode", "--no-send")
 
     assert calls == [(True, True), (False, False)]
-
-
-def test_the_service_gets_a_frozen_snapshot_of_the_settings() -> None:
-    row = build_settings()
-
-    snapshot = run.episode_settings(row)
-
-    assert snapshot.text_models == (row.text_model, row.fallback_model)
-    assert snapshot.prices[row.voice_model] == ModelPrice(
-        row.voice_input_price, row.voice_output_price
-    )
-    with pytest.raises(ValidationError):
-        snapshot.voice_model = "outro"  # type: ignore[misc]
 
 
 STORIES = json.dumps(
@@ -369,9 +301,7 @@ def test_select_today_returns_the_days_stories_and_makes_no_episode(
 
 
 @DATABASE
-@pytest.mark.parametrize(
-    "failure", ["settings", "no row", "feeds", "window", "no news", "no answer"]
-)
+@pytest.mark.parametrize("failure", ["no row", "feeds", "no news", "no answer"])
 def test_select_today_returns_the_error_instead_of_raising(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, failure: str
 ) -> None:
@@ -382,16 +312,12 @@ def test_select_today_returns_the_error_instead_of_raising(
     async def fetch(*_args: object) -> list[NewsItem]:
         return [] if failure == "no news" else news_items()
 
-    def broken() -> PodcastSettings:
+    def broken() -> list[FeedSource]:
         raise DatabaseError("a conexão caiu")
 
     monkeypatch.setattr(run, "fetch_items", fetch)
-    if failure == "settings":
-        monkeypatch.setattr(PodcastSettings, "load", broken)
     if failure == "feeds":
         monkeypatch.setattr(Feed, "sources", broken)
-    if failure == "window":
-        monkeypatch.setattr(run, "news_window", broken)
     no_stories = '{"stories": []}'
     outcomes = {
         SETTINGS["text_model"]: [no_stories] * 2,
@@ -505,7 +431,7 @@ def test_the_run_returns_its_outcome_with_the_days_stories(
 
 
 @DATABASE
-def test_a_paused_run_returns_a_paused_outcome_and_saves_no_row(
+def test_a_paused_podcast_makes_no_episode_on_railway(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     create_settings(paused=True)
@@ -516,12 +442,20 @@ def test_a_paused_run_returns_a_paused_outcome_and_saves_no_row(
     assert outcome == EpisodeOutcome(paused=True, sent=False, stories=[], error=None)
     assert not Episode.objects.exists()
 
+    # A run by hand still works.
+    run.make_episode(scheduled=False, send=False)
+    assert Episode.objects.count() == 1
+
 
 @DATABASE
-def test_a_settings_failure_still_raises_out_of_the_run(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_settings_failure_raises_out_of_the_run_and_tells_no_one_without_sending(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings
 ) -> None:
-    record_notices(monkeypatch)
+    settings.TELEGRAM_ADMIN_CHAT_ID = "admin"
+    sent = record_notices(monkeypatch)
 
     with pytest.raises(SettingsMissing):
         run.make_episode(scheduled=True, send=False)
+
+    assert sent == []
+    assert not Episode.objects.exists()

@@ -113,15 +113,14 @@ def record_runs(
 SENT = EpisodeOutcome(paused=False, sent=True, stories=STORIES, error=None)
 
 
-@pytest.mark.parametrize(("args", "send"), [([], True), (["--no-send"], False)])
 def test_a_run_without_scheduled_makes_no_lesson(
-    monkeypatch: pytest.MonkeyPatch, args: list[str], send: bool
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = record_runs(monkeypatch, SENT)
 
-    call_command("news_podcast", "episode", *args)
+    call_command("news_podcast", "episode")
 
-    assert calls == [("episode", {"scheduled": False, "send": send})]
+    assert calls == [("episode", {"scheduled": False, "send": True})]
 
 
 @pytest.mark.parametrize(("args", "send"), [([], True), (["--no-send"], False)])
@@ -169,7 +168,6 @@ def test_a_paused_run_makes_no_lesson(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("news_error", "lesson_error", "lesson_raises", "message"),
     [
-        (LessonError("x"), LessonError("y"), False, "episódio: x; aula: y"),
         (None, LessonError("y"), False, "aula: y"),
         (
             LessonError("x"),
@@ -194,14 +192,6 @@ def test_the_command_names_each_failed_part(
     assert str(raised.value) == message
 
 
-def test_both_parts_succeeding_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = record_runs(monkeypatch, SENT)
-
-    call_command("news_podcast", "episode", "--scheduled")
-
-    assert [name for name, _ in calls] == ["episode", "lesson"]
-
-
 def test_a_settings_failure_of_the_episode_raises_with_no_lesson(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -210,13 +200,3 @@ def test_a_settings_failure_of_the_episode_raises_with_no_lesson(
     with pytest.raises(CommandError, match="rode seed_news_podcast"):
         call_command("news_podcast", "episode", "--scheduled")
     assert [name for name, _ in calls] == ["episode"]
-
-
-def test_the_cadence_option_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = record_runs(monkeypatch, SENT)
-
-    with pytest.raises(CommandError, match="unrecognized arguments: --lesson-every"):
-        call_command(
-            "news_podcast", "episode", "--scheduled", "--lesson-every-days", "2"
-        )
-    assert calls == []

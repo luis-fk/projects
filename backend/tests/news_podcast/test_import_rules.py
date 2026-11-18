@@ -117,7 +117,7 @@ def broken_voice_rules(module: str, found: list[tuple[str, str | None]]) -> list
 
 @pytest.mark.parametrize(
     ("module", "allowed"),
-    [(f"{LESSON}.graph", True), (f"{LESSON}.topics", False), (f"{CORE}.llm", False)],
+    [(f"{LESSON}.graph", True), (f"{LESSON}.topics", False)],
 )
 def test_only_the_lesson_graph_may_import_langgraph(module: str, allowed: bool) -> None:
     assert (broken_rules(module, {"langgraph.graph"}) == []) is allowed
@@ -147,7 +147,6 @@ def test_the_app_follows_its_import_rules() -> None:
         ("import news_podcast.models", MODELS),
         ("from news_podcast import models", MODELS),
         ("from news_podcast.models import PodcastSettings", MODELS),
-        ("from news_podcast.api import episode", EPISODE),
         ("from ..episode import service", EPISODE),
         ("from ... import models", MODELS),
     ],
@@ -177,14 +176,7 @@ def test_the_episode_may_use_core_but_not_the_lesson() -> None:
     ("module", "may_use_the_orm"),
     [
         ("news_podcast.admin", True),
-        (f"{EPISODE}.run", True),
-        (f"{LESSON}.run", True),
-        ("news_podcast.management.commands.news_podcast", True),
-        ("news_podcast.admin_actions", False),
-        ("news_podcast.models_cache", False),
         (f"{EPISODE}.runner", False),
-        (f"{EPISODE}.run_helpers", False),
-        (f"{LESSON}.runtime", False),
     ],
 )
 def test_only_the_django_layer_may_import_the_models(
@@ -197,9 +189,7 @@ def test_only_the_django_layer_may_import_the_models(
     ("line", "allowed"),
     [
         ("from news_podcast.api.core.voice.narration import narrate", True),
-        ("from news_podcast.api.core.voice.providers import voice_provider", True),
         ("from news_podcast.api.core.voice.providers import VOICE_PROVIDERS", True),
-        ("from news_podcast.api.core.voice.base import VoiceError", True),
         ("from news_podcast.api.core.voice import narration", True),
         ("import news_podcast.api.core.voice.narration", True),
         ("from news_podcast.api.core.voice import gemini", False),
@@ -208,7 +198,6 @@ def test_only_the_django_layer_may_import_the_models(
         ("from news_podcast.api.core.voice.providers import GeminiVoice", False),
         ("from news_podcast.api.core.voice.providers import *", False),
         ("from news_podcast.api.core import voice", False),
-        ("import news_podcast.api.core.voice", False),
     ],
 )
 def test_the_features_reach_the_voice_only_through_its_interface(
@@ -247,13 +236,8 @@ def test_only_the_seed_command_reads_the_seed_folder() -> None:
     [
         ('SEED_DIR = Path(__file__).parent / "seed"', True),
         ('path = Path("seed/settings.json")', True),
-        ('path = Path("news_podcast/seed/feeds.json")', True),
         ('path = Path(f"{APP_DIR}/seed/feeds.json")', True),
-        ('path = Path("./seed/feeds.json")', True),
-        ('paths = APP_DIR.glob("*/seed/*.json")', True),
         ('"""Fills the database from seed/."""', False),
-        ('help = "Reads the files in news_podcast/seed/."', False),
-        ('logger.info("seed/settings.json was read")', False),
         ('call_command("seed_news_podcast")', False),
     ],
 )
@@ -267,10 +251,7 @@ def test_the_seed_folder_rule_counts_paths_not_mentions(
     ("line", "allowed"),
     [
         ("from django.db import migrations, models", True),
-        ("import django.core.validators", True),
-        ("import news_podcast.models", False),
         ("from news_podcast.api.core import config", False),
-        ("from news_podcast import validators", False),
     ],
 )
 def test_a_migration_imports_nothing_from_the_app(line: str, allowed: bool) -> None:

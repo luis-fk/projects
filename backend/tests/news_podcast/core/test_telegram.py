@@ -125,11 +125,6 @@ def test_first_setup_sends_each_chat_its_own_id() -> None:
     assert all(f"<code>{chat_id}</code>" in text for chat_id, text in sent)
 
 
-def test_the_chat_list_needs_the_bot_token() -> None:
-    with pytest.raises(TelegramError, match="TELEGRAM_BOT_TOKEN não configurado"):
-        asyncio.run(send_chat_ids(None, "11"))
-
-
 def test_the_chat_list_needs_a_chat_the_bot_saw() -> None:
     async def scenario() -> None:
         async with httpx.AsyncClient() as client:

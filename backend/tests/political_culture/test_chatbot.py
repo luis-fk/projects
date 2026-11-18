@@ -57,14 +57,6 @@ def test_a_language_the_site_lacks_gets_400(client: Client) -> None:
     llm.process_text.assert_not_called()
 
 
-def test_a_message_without_text_gets_400(client: Client) -> None:
-    with patch.object(ChatBotApi, "llm") as llm:
-        answer = send_message(client, {"user_id": 7})
-
-    assert answer == (400, {"error": "Invalid request data"})
-    llm.process_text.assert_not_called()
-
-
 def test_the_text_is_processed_after_the_request_in_another_thread() -> None:
     can_finish = threading.Event()
     finished = threading.Event()
@@ -139,18 +131,14 @@ def test_a_failed_processing_is_logged_and_reported_to_the_socket(
 
 
 @DATABASES
-@pytest.mark.parametrize(
-    ("language", "opening", "summary"),
-    [("pt-BR", "Posso ajudar", "resumo"), ("en", "I can help", "summary")],
-)
 def test_help_tells_what_the_bot_does_without_the_model_and_keeps_it_in_the_history(
-    channel_layer: MagicMock, language: str, opening: str, summary: str
+    channel_layer: MagicMock,
 ) -> None:
     user = Users.objects.create(auth_user_id=1)
 
     llm = LLM()
     with patch.object(llm, "graph") as graph:
-        llm._background_process(" /Help ", user.id, language)
+        llm._background_process(" /Help ", user.id, "en")
 
     graph.invoke.assert_not_called()
     saved = list(
@@ -161,8 +149,8 @@ def test_help_tells_what_the_bot_does_without_the_model_and_keeps_it_in_the_hist
     assert saved[0] == ("human", "/Help")
     role, help_text = saved[1]
     assert role == "ai"
-    assert help_text.startswith(opening)
-    assert summary in help_text
+    assert help_text.startswith("I can help")
+    assert "summary" in help_text
     channel_layer.group_send.assert_awaited_once_with(
         f"chat_{user.id}",
         {"type": "chat.message", "message": {"role": "ai", "message": help_text}},

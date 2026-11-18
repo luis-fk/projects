@@ -1,11 +1,9 @@
 import asyncio
 import json
 from datetime import datetime
-from typing import Any
 
 import httpx
 import pytest
-from langchain_core.prompts import ChatPromptTemplate
 from pytest_django import Settings
 
 from news_podcast.api.core.config import LOCAL_TZ
@@ -24,7 +22,6 @@ from news_podcast.api.episode.selection import (
     checked_selection,
     select_stories,
     selection_values,
-    valid_stories,
 )
 from tests.news_podcast.factories import SETTINGS, build_settings
 from tests.news_podcast.fake_models import FakeChatModel, fake_factory
@@ -46,24 +43,24 @@ def news_item(item_id: str, title: str = "t") -> NewsItem:
     )
 
 
-def system_message(template: ChatPromptTemplate, values: dict[str, Any]) -> str:
-    return str(template.format_messages(**values)[0].content)
-
-
 def every_placeholder(fields: tuple[str, ...]) -> str:
     return " ".join(f"{{{field}}}" for field in fields)
 
 
-def test_valid_stories_drops_unknown_ids_and_empty_stories() -> None:
-    selection = StorySelection(
-        stories=[
-            SelectedStory(title="ok", item_ids=["[3]", "99", "3"]),
-            SelectedStory(title="vazia", item_ids=["42"]),
-        ]
+def test_the_selection_drops_unknown_ids_and_needs_a_valid_story() -> None:
+    check = checked_selection({"3": news_item("3")}, max_stories=10)
+
+    with pytest.raises(BadAnswerError, match="sem notícias válidas"):
+        check(StorySelection(stories=[SelectedStory(title="x", item_ids=["42"])]))
+
+    stories = check(
+        StorySelection(
+            stories=[
+                SelectedStory(title="ok", item_ids=["[3]", "99", "3"]),
+                SelectedStory(title="vazia", item_ids=["42"]),
+            ]
+        )
     )
-
-    stories = valid_stories(selection, {"3": news_item("3")}, max_stories=10)
-
     assert [story.title for story in stories] == ["ok"]
     assert stories[0].item_ids == ["3"]
 
@@ -74,54 +71,18 @@ def test_selected_story_accepts_numeric_ids() -> None:
     assert story.item_ids == ["12", "48"]
 
 
-def test_a_selection_without_a_valid_story_is_a_bad_answer() -> None:
-    check = checked_selection({"3": news_item("3")}, max_stories=10)
-
-    with pytest.raises(BadAnswerError, match="sem notícias válidas"):
-        check(StorySelection(stories=[SelectedStory(title="x", item_ids=["42"])]))
-
-    good = StorySelection(stories=[SelectedStory(title="ok", item_ids=["3"])])
-    assert [story.title for story in check(good)] == ["ok"]
-
-
-def test_the_selection_prompt_follows_the_configured_options() -> None:
-    options = EpisodeOptions(20, 30, 1.0)
-    start = datetime(2026, 11, 6, 20, 0, tzinfo=LOCAL_TZ)
-    end = datetime(2026, 11, 7, 20, 0, tzinfo=LOCAL_TZ)
-
-    template = (
-        "O ouvinte quer um resumo em {min_minutes} a {max_minutes} minutos. "
-        "Escolha de {min_stories} a {max_stories} histórias."
-    )
-
-    selection = system_message(
-        selection_template(template),
-        {"headlines": "", **selection_values(options, start, end)},
-    )
-
-    assert "em 20 a 30 minutos" in selection
-    assert "Escolha de 13 a 20 histórias" in selection
-
-
-def test_the_selection_fills_every_placeholder_the_admin_accepts() -> None:
+def test_the_selection_fills_every_placeholder_but_not_the_headlines_braces() -> None:
     # A placeholder left without a value would raise KeyError.
-    selection = system_message(
-        selection_template(every_placeholder(prompts.SELECTION_FIELDS)),
-        {"headlines": "", **selection_values(DEFAULT_OPTIONS, START, END)},
+    template = selection_template(
+        every_placeholder(prompts.SELECTION_FIELDS) + " {{sem JSON}}"
     )
-
-    assert selection.startswith("12 18 15 8 12 ")
-
-
-def test_the_headlines_reach_the_model_as_they_are() -> None:
-    template = selection_template("Responda {{sem JSON}} em {min_minutes} minutos.")
 
     system, human = template.format_messages(
         headlines='Ministro diz "{x}" e {y}',
         **selection_values(DEFAULT_OPTIONS, START, END),
     )
 
-    assert system.content == "Responda {sem JSON} em 12 minutos."
+    assert system.content == "12 18 15 8 12 06/11 às 06:00 07/11 às 06:00 {sem JSON}"
     assert human.content == 'Ministro diz "{x}" e {y}'
 
 

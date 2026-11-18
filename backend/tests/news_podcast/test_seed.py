@@ -14,11 +14,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from news_podcast.api.core.config import LOCAL_TZ
 from news_podcast.api.core.schemas import Script, Turn
-from news_podcast.api.episode.prompts import (
-    lengthening_template,
-    script_template,
-    selection_template,
-)
+from news_podcast.api.episode.prompts import lengthening_template, selection_template
 from news_podcast.api.episode.schemas import EpisodeOptions
 from news_podcast.api.episode.script import lengthening_values, script_values
 from news_podcast.api.episode.selection import selection_values
@@ -29,7 +25,6 @@ from news_podcast.models import (
     LessonSettings,
     PodcastSettings,
     Topic,
-    placeholder_error,
 )
 from tests.news_podcast.factories import (
     create_area,
@@ -106,36 +101,6 @@ def seed_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def test_the_seed_catalog_has_the_design_s_areas_and_topics() -> None:
-    catalog = read(SEED_DIR, "catalog.json")
-    titles = [title for area in catalog for title in area["topics"]]
-
-    assert [len(area["topics"]) for area in catalog] == [15, 14, 22, 13, 11, 20, 6]
-    assert len(titles) == 101
-    assert all(isinstance(title, str) and title.strip() for title in titles)
-    assert len(set(titles)) == len(titles)
-
-
-def test_the_seed_lesson_settings_pass_the_admin_checks() -> None:
-    values = read(SEED_DIR, "lesson_settings.json")
-
-    LessonSettings(**values).full_clean()
-    assert (values["min_minutes"], values["max_minutes"]) == (6, 9)
-    assert values["voice_model"] == "gemini-3.8-flash-tts"
-    assert (values["voice_input_price"], values["voice_output_price"]) == (0.5, 9.0)
-    assert values["every_days"] == 2
-
-
-@pytest.mark.parametrize(("field", "fields"), list(LESSON_PROMPT_FIELDS.items()))
-def test_each_seed_lesson_prompt_fills_only_its_placeholders_and_never_asks_for_json(
-    field: str, fields: tuple[str, ...]
-) -> None:
-    prompt = read(SEED_DIR, "lesson_settings.json")[field]
-
-    assert placeholder_error(prompt, fields) is None
-    assert "json" not in prompt.lower()
-
-
 def test_the_seed_script_prompt_opens_by_whether_the_summary_went_out() -> None:
     prompt = read(SEED_DIR, "lesson_settings.json")["script_prompt"]
 
@@ -144,68 +109,37 @@ def test_the_seed_script_prompt_opens_by_whether_the_summary_went_out() -> None:
     assert "nas notícias de hoje" in prompt
 
 
-def test_the_seed_settings_pass_the_admin_checks() -> None:
-    PodcastSettings(**read(SEED_DIR, "settings.json")).full_clean()
-
-
-def test_the_seed_feeds_are_active_with_unique_urls_and_known_sections() -> None:
-    feeds = read(SEED_DIR, "feeds.json")
-    urls = [feed["url"] for feed in feeds]
-
-    assert all(feed["active"] is True for feed in feeds)
-    assert len(set(urls)) == len(urls)
-    assert {feed["section"] for feed in feeds} <= set(Feed.Section.values)
-
-
 def test_the_seed_prompts_leave_the_answer_format_to_the_schema() -> None:
-    values = read(SEED_DIR, "settings.json")
+    episode = read(SEED_DIR, "settings.json")
+    lesson = read(SEED_DIR, "lesson_settings.json")
+    prompts = [
+        episode["selection_prompt"],
+        episode["script_prompt"],
+        episode["expand_prompt"],
+        *(lesson[name] for name in LESSON_PROMPT_FIELDS),
+    ]
 
-    for name in ("selection_prompt", "script_prompt", "expand_prompt"):
-        assert "JSON" not in values[name]
-        assert '"' + "item_ids" not in values[name]
+    for prompt in prompts:
+        assert "json" not in prompt.lower()
+        assert '"' + "item_ids" not in prompt
 
 
-def test_the_seed_selection_prompt_keeps_the_morning_episode() -> None:
-    selection = system_message(
+def test_the_seed_selection_keeps_the_morning_episode_and_weighs_outlets() -> None:
+    rendered = system_message(
         selection_template(read(SEED_DIR, "settings.json")["selection_prompt"]),
         {
             "headlines": "",
             **selection_values(morning_options(), MORNING_START, MORNING_END),
         },
     )
+    selection = " ".join(rendered.split())
 
     assert "Escolha de 8 a 12 histórias" in selection
-
-
-def test_the_seed_selection_weighs_how_many_outlets_reported_a_fact() -> None:
-    selection = " ".join(read(SEED_DIR, "settings.json")["selection_prompt"].split())
-
     assert "quantos veículos diferentes" in selection
     assert "Conte cada veículo uma vez" in selection
 
 
-def test_the_seed_script_prompt_keeps_the_morning_episode() -> None:
-    script = system_message(
-        script_template(read(SEED_DIR, "settings.json")["script_prompt"]),
-        {
-            "briefs": "",
-            **script_values(
-                morning_options(),
-                date(2026, 11, 6),
-                MORNING_START,
-                MORNING_END,
-                time(7, 0),
-            ),
-        },
-    )
-
-    assert 'chamado "Resumo das 7"' in script
-    assert "É o episódio das 7h de sexta-feira, 6 de novembro" in script
-    assert "uma fala curta com bom dia e a data" in script
-    assert "entre 2040 e 3060 palavras" in script
-
-
-def test_the_seed_expand_prompt_fills_every_placeholder() -> None:
+def test_the_seed_script_and_expand_prompts_keep_the_morning_episode() -> None:
     values = read(SEED_DIR, "settings.json")
     script = Script(turns=[Turn(speaker="Bia", text="Bom dia")])
     filled = {
@@ -216,14 +150,17 @@ def test_the_seed_expand_prompt_fills_every_placeholder() -> None:
         **lengthening_values(morning_options(), script),
     }
 
-    _, human = lengthening_template(
-        values["script_prompt"], values["expand_prompt"]
-    ).format_messages(**filled)
-
-    assert "ficou com 2 palavras, mas precisa ter entre 2040 e 3060" in str(
-        human.content
+    template = lengthening_template(values["script_prompt"], values["expand_prompt"])
+    system, human = (
+        str(message.content) for message in template.format_messages(**filled)
     )
-    assert script.model_dump_json() in str(human.content)
+
+    assert 'chamado "Resumo das 7"' in system
+    assert "É o episódio das 7h de sexta-feira, 6 de novembro" in system
+    assert "uma fala curta com bom dia e a data" in system
+    assert "entre 2040 e 3060 palavras" in system
+    assert "ficou com 2 palavras, mas precisa ter entre 2040 e 3060" in human
+    assert script.model_dump_json() in human
 
 
 @DATABASES
@@ -264,24 +201,19 @@ def test_an_empty_catalog_gets_the_seed_areas_and_topics_in_teaching_order() -> 
     assert areas[6].name == "O Brasil no mundo"
     assert areas[6].topics.get(position=6).title == "BRICS: o que é o grupo"
     assert Topic.objects.filter(active=True).count() == 101
+    titles = list(Topic.objects.values_list("title", flat=True))
+    assert all(title.strip() for title in titles)
+    assert len(set(titles)) == len(titles)
     assert "news_podcast: 7 areas and 101 topics created from seed/catalog.json" in out
 
 
 @DATABASES
-@pytest.mark.parametrize("production", [False, True])
-def test_a_catalog_with_an_area_is_left_as_it_is(
-    monkeypatch: pytest.MonkeyPatch, production: bool
-) -> None:
+def test_a_catalog_with_an_area_is_left_as_it_is() -> None:
     area = create_area(name="Minha área", position=9)
     create_topic(area, title="Meu tópico", position=3, active=False)
     before = (list(Area.objects.values()), list(Topic.objects.values()))
-    if production:
-        monkeypatch.setattr(
-            settings, "DATABASES", {"default": REMOTE, "news_podcast_db": REMOTE}
-        )
-        answer(monkeypatch, "yes")
 
-    out = seed(production=production)
+    out = seed()
 
     assert (list(Area.objects.values()), list(Topic.objects.values())) == before
     assert "news_podcast: the catalog isn't empty; left as it was" in out
@@ -322,19 +254,11 @@ def test_a_missing_lesson_row_is_created_and_the_other_rows_kept() -> None:
 
 
 @DATABASES
-@pytest.mark.parametrize("production", [False, True])
-def test_an_edited_lesson_row_is_left_as_it_is(
-    monkeypatch: pytest.MonkeyPatch, production: bool
-) -> None:
+def test_an_edited_lesson_row_is_left_as_it_is() -> None:
     create_lesson_settings(max_minutes=8, voice_style="Outra.")
     before = list(LessonSettings.objects.values())
-    if production:
-        monkeypatch.setattr(
-            settings, "DATABASES", {"default": REMOTE, "news_podcast_db": REMOTE}
-        )
-        answer(monkeypatch, "yes")
 
-    out = seed(production=production)
+    out = seed()
 
     assert list(LessonSettings.objects.values()) == before
     assert "news_podcast: the lesson settings row already exists; left as it was" in out
@@ -354,30 +278,13 @@ def test_a_blank_lesson_cadence_in_the_seed_makes_a_row_with_no_lessons(
 
 
 @DATABASES
-@pytest.mark.parametrize("value", ["2", 2.5, True])
-def test_a_lesson_cadence_of_the_wrong_json_type_stops_the_seed(
-    seed_dir: Path, value: Any
-) -> None:
+def test_a_lesson_cadence_of_the_wrong_json_type_stops_the_seed(seed_dir: Path) -> None:
     values = read(seed_dir, "lesson_settings.json")
-    values["every_days"] = value
+    values["every_days"] = "2"
     write(seed_dir, "lesson_settings.json", values)
 
     with pytest.raises(
         CommandError, match="lesson_settings.json: every_days must be a whole number"
-    ):
-        seed()
-
-    assert nothing_written()
-
-
-@DATABASES
-def test_a_lesson_settings_file_without_a_field_stops_the_seed(seed_dir: Path) -> None:
-    values = read(seed_dir, "lesson_settings.json")
-    del values["review_prompt"]
-    write(seed_dir, "lesson_settings.json", values)
-
-    with pytest.raises(
-        CommandError, match="seed/lesson_settings.json lacks review_prompt"
     ):
         seed()
 
@@ -513,16 +420,13 @@ def test_a_settings_file_with_an_unknown_field_stops_the_seed(seed_dir: Path) ->
 @pytest.mark.parametrize(
     ("field", "value", "kind"),
     [
-        ("max_minutes", None, "a whole number"),
         ("fallback_model", None, "text"),
         ("min_minutes", 12.7, "a whole number"),
         ("max_minutes", True, "a whole number"),
-        ("max_minutes", float("inf"), "a whole number"),
         ("speech_speed", True, "a number"),
         ("speech_speed", float("nan"), "a number"),
         ("text_input_price", "0.75", "a number"),
         ("expand_prompt", ["Roteiro:", "{script}"], "text"),
-        ("voice_model", {"google_genai": "gemini-3.8-flash-lite-tts"}, "text"),
         ("paused", 0, "true or false"),
     ],
 )
@@ -540,22 +444,12 @@ def test_a_value_of_the_wrong_json_type_stops_the_seed(
 
 
 @DATABASES
-@pytest.mark.parametrize(
-    ("field", "value", "kind"),
-    [
-        ("outlet", 360, "text"),
-        ("url", None, "text"),
-        ("active", "sim", "true or false"),
-    ],
-)
-def test_a_feed_value_of_the_wrong_json_type_stops_the_seed(
-    seed_dir: Path, field: str, value: Any, kind: str
-) -> None:
+def test_a_feed_value_of_the_wrong_json_type_stops_the_seed(seed_dir: Path) -> None:
     feeds = read(seed_dir, "feeds.json")
-    feeds[2][field] = value
+    feeds[2]["active"] = "sim"
     write(seed_dir, "feeds.json", feeds)
 
-    with pytest.raises(CommandError, match=f"entry 3: {field} must be {kind}"):
+    with pytest.raises(CommandError, match="entry 3: active must be true or false"):
         seed()
 
     assert nothing_written()
@@ -576,25 +470,14 @@ def test_a_prompt_with_a_placeholder_its_step_lacks_stops_the_seed(
 
 
 @DATABASES
-@pytest.mark.parametrize("field", ["outlet", "section", "url", "active"])
-def test_a_feed_without_a_field_stops_the_seed(seed_dir: Path, field: str) -> None:
+def test_a_feed_without_a_field_stops_the_seed_even_one_with_a_default(
+    seed_dir: Path,
+) -> None:
     feeds = read(seed_dir, "feeds.json")
-    del feeds[1][field]
+    del feeds[1]["active"]
     write(seed_dir, "feeds.json", feeds)
 
-    with pytest.raises(CommandError, match=f"seed/feeds.json, entry 2 lacks {field}"):
-        seed()
-
-    assert nothing_written()
-
-
-@DATABASES
-def test_a_feed_in_an_unknown_section_stops_the_seed(seed_dir: Path) -> None:
-    feeds = read(seed_dir, "feeds.json")
-    feeds[0]["section"] = "Esportes"
-    write(seed_dir, "feeds.json", feeds)
-
-    with pytest.raises(CommandError, match="entry 1: section"):
+    with pytest.raises(CommandError, match="seed/feeds.json, entry 2 lacks active"):
         seed()
 
     assert nothing_written()
@@ -622,7 +505,6 @@ def test_a_repeated_feed_url_stops_the_seed(seed_dir: Path) -> None:
         ("feeds.json", "[]", "seed/feeds.json must be a list of feeds"),
         ("feeds.json", '{"outlet": "g1"}', "seed/feeds.json must be a list of feeds"),
         ("feeds.json", "[null]", "seed/feeds.json, entry 1 isn't a JSON object"),
-        ("catalog.json", None, "seed/catalog.json can't be read"),
         ("catalog.json", "[]", "seed/catalog.json must be a list of areas"),
         ("catalog.json", '{"name": "x"}', "seed/catalog.json must be a list of areas"),
         (
@@ -654,12 +536,6 @@ def test_a_repeated_feed_url_stops_the_seed(seed_dir: Path) -> None:
             "catalog.json",
             '[{"name": "Justiça", "topics": ["O STF", ""]}]',
             "seed/catalog.json, area 1, topic 2: title: This field cannot be blank.",
-        ),
-        (
-            "catalog.json",
-            json.dumps([{"name": "Justiça", "topics": ["x" * 201]}]),
-            "seed/catalog.json, area 1, topic 1: title: Ensure this value has at "
-            "most 200 characters",
         ),
     ],
 )

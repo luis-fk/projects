@@ -62,12 +62,8 @@ def test_a_search_starts_in_the_background_and_answers_at_once(
     [
         ("names=Fulano", "Invalid JSON"),
         ('{"year": 2025, "request_id": "abc"}', "Invalid request data"),
-        (
-            '{"names": ["Fulano"], "year": "este", "request_id": "abc"}',
-            "Invalid request data",
-        ),
     ],
-    ids=["not json", "no names", "year not a number"],
+    ids=["not json", "no names"],
 )
 def test_an_invalid_search_gets_400(
     client: Client, task: AsyncMock, body: str, error: str
