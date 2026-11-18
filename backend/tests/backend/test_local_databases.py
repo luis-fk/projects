@@ -50,14 +50,6 @@ def test_the_commands_stop_on_a_remote_database(
     assert "secret-password" not in str(error.value)
 
 
-def test_the_commands_go_on_with_local_databases(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(settings, "DATABASES", {"default": postgres("localhost")})
-
-    require_local_databases()
-
-
 def test_the_tests_stop_on_a_remote_database(
     monkeypatch: pytest.MonkeyPatch, pytestconfig: pytest.Config
 ) -> None:

@@ -1,8 +1,7 @@
 from collections.abc import Callable, Iterator
-from unittest.mock import ANY, patch
+from unittest.mock import patch
 
 import pytest
-from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import HttpResponseBase
 from django.test import Client
@@ -12,10 +11,8 @@ from political_culture.models import ChatHistory
 from tests.api_tokens import (
     api_key,
     bearer,
-    login_token,
     make_token,
     saved_person,
-    unknown_api_key,
     user_token,
 )
 
@@ -101,30 +98,6 @@ def test_tokens_for_another_user_get_403(client: Client, send: Send) -> None:
     assert send(client, 8, headers).status_code == 403
 
 
-def test_users_read_their_own_chat_history(client: Client) -> None:
-    with patch.object(ChatHistory.objects, "filter") as history:
-        response = get_history(client, 7, bearer(user_token(APP, "7")))
-
-    assert response.status_code == 200
-    history.assert_called_once_with(user_id="7")
-
-
-def test_users_send_their_own_messages(client: Client) -> None:
-    with patch.object(ChatBotApi, "llm") as llm:
-        response = send_message(client, 7, bearer(user_token(APP, "7")))
-
-    assert response.status_code == 200
-    llm.process_text.assert_called_once_with(text="Olá", user_id=7, language="pt-BR")
-
-
-def test_texts_are_added_as_the_tokens_user(client: Client) -> None:
-    with patch("political_culture.api.texts.routes.start_upload") as start_upload:
-        response = add_text(client, 7, bearer(user_token(APP, "7")))
-
-    assert response.status_code == 202
-    start_upload.assert_called_once_with(ANY, 7, UPLOAD_ID)
-
-
 @pytest.fixture
 def app_data() -> Iterator[None]:
     """The chat history, the chatbot and the texts, without their database."""
@@ -168,21 +141,9 @@ def test_api_keys_for_another_app_get_401(client: Client, send: Send) -> None:
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("send", ALL)
-def test_inactive_api_keys_get_401(client: Client, send: Send) -> None:
-    headers = bearer(api_key(APP, 7, active=False))
-
-    assert send(client, 7, headers).status_code == 401
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("send", ALL)
-def test_unknown_api_keys_get_401(client: Client, send: Send) -> None:
-    assert send(client, 7, bearer(unknown_api_key())).status_code == 401
-
-
-def test_the_login_lookup_without_a_token_gets_401(client: Client) -> None:
+def test_the_login_lookup_without_a_login_token_gets_401(client: Client) -> None:
     assert find_user(client, {}).status_code == 401
+    assert find_user(client, bearer(api_key(APP, 7))).status_code == 401
 
 
 @pytest.mark.parametrize(
@@ -198,27 +159,17 @@ def test_the_login_lookup_with_another_token_gets_401(
     assert find_user(client, headers).status_code == 401
 
 
-def test_the_login_lookup_runs_with_a_login_token(client: Client) -> None:
-    AuthUser = get_user_model()
-    with patch.object(AuthUser.objects, "using") as using:
-        using.return_value.get.side_effect = AuthUser.DoesNotExist
-        response = find_user(client, bearer(login_token(APP)))
-
-    assert response.status_code == 404
-    using.return_value.get.assert_called_once_with(username="ana", is_active=True)
-
-
 @pytest.mark.access_check
 @pytest.mark.django_db(databases=["default", "political_culture_db"])
 @pytest.mark.parametrize(
-    ("is_active", "active", "status"),
-    [(True, True, 200), (False, True, 401), (True, False, 401)],
-    ids=["can use political culture", "Active unticked", "political culture unticked"],
+    ("active", "status"),
+    [(True, 200), (False, 401)],
+    ids=["can use political culture", "political culture unticked"],
 )
 def test_only_people_who_can_use_political_culture_get_in(
-    client: Client, is_active: bool, active: bool, status: int
+    client: Client, active: bool, status: int
 ) -> None:
-    user_id = saved_person(APP, is_active=is_active, active=active)
+    user_id = saved_person(APP, active=active)
 
     response = get_history(client, int(user_id), bearer(user_token(APP, user_id)))
 

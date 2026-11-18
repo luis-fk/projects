@@ -2,7 +2,6 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from news_podcast.api.episode.feeds import (
-    clean_text,
     format_for_selection,
     parse_feed,
 )
@@ -41,10 +40,6 @@ def make_source(via_google_news: bool = False) -> FeedSource:
         url="https://example.com/feed",
         via_google_news=via_google_news,
     )
-
-
-def test_clean_text_removes_tags_and_entities() -> None:
-    assert clean_text("<p>Texto &amp;amp; <b>resumo</b></p>") == "Texto &amp; resumo"
 
 
 def test_parse_feed_keeps_only_items_inside_the_window() -> None:

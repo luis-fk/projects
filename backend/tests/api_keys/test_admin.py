@@ -25,11 +25,15 @@ def person_in(*apps: type[PlantsUsers] | type[CfflchUsers]) -> tuple[int, list[i
 
 
 @DATABASES
-def test_the_admin_shows_a_new_key_only_once(admin_client: Client) -> None:
-    maria, _ = person_in(PlantsUsers)
+def test_a_new_key_keeps_the_persons_id_in_each_app_and_is_shown_only_once(
+    admin_client: Client,
+) -> None:
+    maria, (in_plants, in_cfflch) = person_in(PlantsUsers, CfflchUsers)
 
     response = admin_client.post(
-        ADD_URL, {"name": "Bruno", "person": maria, "apps": ["plants"]}, follow=True
+        ADD_URL,
+        {"name": "Bruno", "person": maria, "apps": ["plants", "cfflch"]},
+        follow=True,
     )
 
     page = html.unescape(response.content.decode())
@@ -42,24 +46,11 @@ def test_the_admin_shows_a_new_key_only_once(admin_client: Client) -> None:
     row = ApiKey.objects.values().get()
     assert row["key_hash"] == hash_key(shown[0])
     assert shown[0] not in str(row)
+    assert row["auth_user_id"] == maria
+    assert row["users"] == {"plants": in_plants, "cfflch": in_cfflch}
 
     for url in [LIST_URL, f"{LIST_URL}{row['id']}/change/"]:
         assert not FULL_KEY.search(admin_client.get(url).content.decode())
-
-
-@DATABASES
-def test_a_key_for_several_apps_keeps_the_persons_id_in_each(
-    admin_client: Client,
-) -> None:
-    maria, (in_plants, in_cfflch) = person_in(PlantsUsers, CfflchUsers)
-
-    admin_client.post(
-        ADD_URL, {"name": "Bruno", "person": maria, "apps": ["plants", "cfflch"]}
-    )
-
-    key = ApiKey.objects.get()
-    assert key.auth_user_id == maria
-    assert key.users == {"plants": in_plants, "cfflch": in_cfflch}
 
 
 @DATABASES

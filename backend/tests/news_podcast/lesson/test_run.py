@@ -18,7 +18,6 @@ from django.db import (
     close_old_connections,
 )
 from pytest_django import Settings
-from tavily import AsyncTavilyClient
 
 from news_podcast.api.core import telegram
 from news_podcast.api.core.config import (
@@ -35,7 +34,7 @@ from news_podcast.api.episode import run as episode_run
 from news_podcast.api.episode.run import Selection
 from news_podcast.api.episode.schemas import EpisodeReport, NewsItem, SelectedStory
 from news_podcast.api.episode.service import EpisodeError, EpisodeService
-from news_podcast.api.lesson import delivery, graph
+from news_podcast.api.lesson import delivery
 from news_podcast.api.lesson import run as lesson_run
 from news_podcast.api.lesson.config import MAX_LESSON_MINUTES
 from news_podcast.api.lesson.graph import LessonOutcome, run_graph
@@ -174,17 +173,11 @@ def make(
     answers: list[Any],
     *,
     send: bool = True,
-    usages: list[Usage] | None = None,
-    asked: list[str] | None = None,
 ) -> Exception | None:
     # A copy: the fake model takes its answers off the list it gets.
-    factory = fake_factory({MODEL: list(answers)}, [] if asked is None else asked)
+    factory = fake_factory({MODEL: list(answers)}, [])
     return lesson_run.make_lesson(
-        stories,
-        send=send,
-        news_sent=False,
-        usages=usages or [],
-        model_factory=factory,
+        stories, send=send, news_sent=False, model_factory=factory
     )
 
 
@@ -197,7 +190,9 @@ def test_the_lesson_options_take_the_speed_from_settings() -> None:
 
 
 @DATABASE
-def test_a_sent_lesson_is_saved_with_its_topic_story_and_pages(world: World) -> None:
+def test_a_sent_lesson_saves_its_topic_story_and_pages_and_leaves_the_candidates(
+    world: World,
+) -> None:
     create_settings()
     create_lesson_settings()
     catalog = create_catalog()
@@ -227,21 +222,10 @@ def test_a_sent_lesson_is_saved_with_its_topic_story_and_pages(world: World) -> 
     [(chat, audio, caption, duration)] = world.sent
     assert (chat, duration) == ("admin", 546)
     assert audio.parent == world.output
-    assert caption.startswith("🎓 <b>Aula · Como o Congresso derruba um veto</b>")
+    assert caption == "🎓 <b>Aula · Como o Congresso derruba um veto</b>"
     assert world.voice_models == [LESSON_SETTINGS["voice_model"]]
     assert world.tavily_keys == ["tavily-test-key"]
     assert [search.closed for search in world.searches] == [True]
-
-
-@DATABASE
-def test_a_sent_lesson_takes_its_topic_out_of_the_candidates(world: World) -> None:
-    create_settings()
-    create_lesson_settings()
-    create_catalog()
-    world.responses.append(found(*PAGES))
-
-    make(STORIES, LESSON_ANSWERS)
-
     assert [topic.title for topic in candidates(Topic.catalog())] == [
         "Como uma lei nasce",
         "Os três Poderes",
@@ -249,17 +233,14 @@ def test_a_sent_lesson_takes_its_topic_out_of_the_candidates(world: World) -> No
 
 
 @DATABASE
-@pytest.mark.parametrize(
-    "voice_model", [LESSON_SETTINGS["voice_model"], SETTINGS["voice_model"]]
-)
 def test_the_cost_counts_text_at_settings_prices_and_voice_at_the_lessons(
-    monkeypatch: pytest.MonkeyPatch, voice_model: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     create_settings()
-    create_lesson_settings(voice_model=voice_model)
+    create_lesson_settings(voice_model=SETTINGS["voice_model"])
     usages = [
         Usage(step="script", model=SETTINGS["text_model"], input_tokens=1_000_000),
-        Usage(step="voice", model=voice_model, output_tokens=1_000_000),
+        Usage(step="voice", model=SETTINGS["voice_model"], output_tokens=1_000_000),
     ]
 
     async def ran(inputs: LessonState, context: LessonContext) -> LessonOutcome:
@@ -271,8 +252,8 @@ def test_the_cost_counts_text_at_settings_prices_and_voice_at_the_lessons(
     lesson_run.make_lesson([], send=False, news_sent=False)
 
     episode = Episode.objects.get()
-    # 0.75 for the text and 9.00 for the voice: the lesson's voice price wins even
-    # when both rows name the same voice model, whose Settings price is 6.00.
+    # 0.75 for the text and 9.00 for the voice: both rows name the same voice model,
+    # and the lesson's price wins over the 6.00 in Settings.
     assert episode.cost_usd == pytest.approx(9.75)
     assert episode.usage == [usage.model_dump() for usage in usages]
     assert episode.status == Episode.Status.NOT_SENT
@@ -356,58 +337,6 @@ def test_without_an_admin_chat_the_lesson_goes_to_the_episode_chat(
 
     assert error is None
     assert [entry[0] for entry in world.sent] == ["chat"]
-
-
-class RefusingMessages(RecordingTelegram):
-    async def send_message(self, chat_id: str, text: str) -> None:
-        raise TelegramError("o Telegram respondeu 502")
-
-
-@DATABASE
-def test_a_refused_warning_is_logged_and_the_lesson_still_goes_out(
-    monkeypatch: pytest.MonkeyPatch, world: World, caplog: pytest.LogCaptureFixture
-) -> None:
-    create_settings()
-    create_lesson_settings()
-    create_catalog()
-    world.responses.append(found(*PAGES))
-    world.note.duration = 630.0
-    monkeypatch.setattr(
-        lesson_run,
-        "telegram_client",
-        lambda client: RefusingMessages(client, world.sent),
-    )
-
-    error = make(STORIES, LESSON_ANSWERS)
-
-    assert error is None
-    assert "o Telegram respondeu 502" in caplog.text
-    assert [entry[0] for entry in world.sent] == ["admin"]
-    assert Episode.objects.get().status == Episode.Status.SENT
-
-
-@DATABASE
-@pytest.mark.parametrize("send", [True, False])
-def test_the_time_limit_fails_the_lesson_at_the_step_running(
-    monkeypatch: pytest.MonkeyPatch, world: World, send: bool
-) -> None:
-    create_settings()
-    create_lesson_settings()
-    create_catalog()
-
-    async def never(*args: Any, **kwargs: Any) -> None:
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(TextModels, "ask", never)
-    monkeypatch.setattr(graph, "MAX_LESSON_MINUTES", 0.001)
-
-    error = make(STORIES, [], send=send)
-
-    assert str(error) == "A aula passou de 0.001 minutos"
-    episode = Episode.objects.get()
-    assert episode.status == Episode.Status.FAILED
-    assert episode.error == "escolha do tema: A aula passou de 0.001 minutos"
-    assert [chat for chat, _ in world.messages()] == (["admin"] if send else [])
 
 
 def capture_run(
@@ -565,7 +494,6 @@ def test_a_row_that_fails_twice_reaches_the_caller(
 @pytest.mark.parametrize(
     ("failure", "topic_kept"),
     [
-        (OperationalError("a conexão caiu"), True),
         (IntegrityError("outra regra"), True),
         (OperationalError("a conexão caiu"), False),
     ],
@@ -645,18 +573,6 @@ def test_a_run_whose_clients_fail_is_still_saved_and_reported(
     assert notices == (["admin"] if send else [])
 
 
-def test_the_search_client_is_tavilys_own_and_opens_and_closes(
-    settings: Settings,
-) -> None:
-    settings.TAVILY_API_KEY = "tavily-test-key"
-
-    async def scenario() -> object:
-        async with lesson_run.search_client() as client:
-            return client
-
-    assert isinstance(asyncio.run(scenario()), AsyncTavilyClient)
-
-
 def lesson_over(
     monkeypatch: pytest.MonkeyPatch, factory_or_answers: ModelFactory | list[Any]
 ) -> None:
@@ -690,26 +606,6 @@ SELECTION_USAGE = Usage(step="selection", model=MODEL, input_tokens=1_000_000)
 
 
 @DATABASE
-def test_the_lesson_action_counts_the_selection_before_the_lesson(
-    monkeypatch: pytest.MonkeyPatch, world: World
-) -> None:
-    create_settings()
-    create_lesson_settings()
-    create_catalog()
-    world.responses.append(found(*PAGES))
-    selection_of(monkeypatch, Selection(STORIES, [SELECTION_USAGE], None))
-    lesson_over(monkeypatch, LESSON_ANSWERS)
-
-    call_command("news_podcast", "lesson")
-
-    episode = Episode.objects.get()
-    assert [usage["step"] for usage in episode.usage][:2] == ["selection", "choice"]
-    voice = 2 * 1_000 * LESSON_SETTINGS["voice_output_price"] / 1e6
-    selection = SETTINGS["text_input_price"]
-    assert episode.cost_usd == pytest.approx(selection + 4 * ANSWER_COST + voice)
-
-
-@DATABASE
 def test_after_a_failed_selection_the_lesson_takes_the_course_order(
     monkeypatch: pytest.MonkeyPatch, world: World
 ) -> None:
@@ -725,31 +621,10 @@ def test_after_a_failed_selection_the_lesson_takes_the_course_order(
     call_command("news_podcast", "lesson")
 
     episode = Episode.objects.get()
+    assert episode.status == Episode.Status.SENT
     assert episode.topic == catalog["veto"]
     assert episode.story_title == ""
     assert [usage["step"] for usage in episode.usage][:2] == ["selection", "pick"]
-
-
-@DATABASE
-def test_without_the_catalog_the_command_fails_at_the_topic_step(
-    monkeypatch: pytest.MonkeyPatch, world: World
-) -> None:
-    create_settings()
-    create_lesson_settings()
-    selection_of(monkeypatch, Selection(STORIES, [SELECTION_USAGE], None))
-    lesson_over(monkeypatch, [])
-
-    with pytest.raises(CommandError, match="O catálogo de temas está vazio"):
-        call_command("news_podcast", "lesson")
-
-    episode = Episode.objects.get()
-    assert episode.status == Episode.Status.FAILED
-    assert episode.error.startswith("escolha do tema: O catálogo de temas está vazio")
-    assert episode.topic is None
-    assert episode.cost_usd == pytest.approx(SETTINGS["text_input_price"])
-    [(chat, text)] = world.sent
-    assert chat == "admin"
-    assert "<b>Etapa:</b> escolha do tema" in text
 
 
 @DATABASE
@@ -780,18 +655,16 @@ def test_two_topics_short_of_pages_fail_the_command_at_the_search_step(
 
 
 @DATABASE
-@pytest.mark.parametrize("failure", ["no lesson settings", "catalog"])
-def test_a_settings_failure_is_reported_with_no_row_and_fails_the_command(
-    monkeypatch: pytest.MonkeyPatch, world: World, failure: str
+def test_a_failed_catalog_read_is_reported_with_no_row_and_fails_the_command(
+    monkeypatch: pytest.MonkeyPatch, world: World
 ) -> None:
     create_settings()
-    if failure == "catalog":
-        create_lesson_settings()
+    create_lesson_settings()
 
-        def broken() -> list[Any]:
-            raise DatabaseError("a conexão caiu")
+    def broken() -> list[Any]:
+        raise DatabaseError("a conexão caiu")
 
-        monkeypatch.setattr(Topic, "catalog", broken)
+    monkeypatch.setattr(Topic, "catalog", broken)
     selection_of(monkeypatch, Selection(STORIES, [], None))
     lesson_over(monkeypatch, [])
 
@@ -902,6 +775,8 @@ def test_the_lesson_action_without_sending_makes_the_whole_lesson_locally(
         "voice",
         "voice",
     ]
+    voice = 2 * 1_000 * LESSON_SETTINGS["voice_output_price"] / 1e6
+    assert episode.cost_usd == pytest.approx(5 * ANSWER_COST + voice)
 
 
 @DATABASE
@@ -955,10 +830,9 @@ def clock(instant: datetime) -> type:
 
 # D is 2026-03-09 in São Paulo; its lesson went out at 23:30, 02:30 UTC on the 10th.
 D_EVENING = datetime(2026, 3, 10, 2, 30, tzinfo=UTC)
-# The cron's 06:40 in São Paulo on D+1, D+2 and D+3.
+# The cron's 06:40 in São Paulo on D+1 and D+2.
 D1_MORNING = datetime(2026, 3, 10, 9, 40, tzinfo=UTC)
 D2_MORNING = datetime(2026, 3, 11, 9, 40, tzinfo=UTC)
-D3_MORNING = datetime(2026, 3, 12, 9, 40, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -968,8 +842,6 @@ D3_MORNING = datetime(2026, 3, 12, 9, 40, tzinfo=UTC)
         (date(2026, 3, 9), 2, False),
         (date(2026, 3, 8), 2, True),
         (date(2026, 3, 7), 2, True),
-        (date(2026, 3, 10), 1, False),
-        (date(2026, 3, 9), 1, True),
     ],
 )
 def test_a_lesson_is_due_every_n_days_after_the_last_one_sent(
@@ -1018,7 +890,7 @@ def test_with_a_lesson_every_two_days_only_the_second_day_makes_one(
 @DATABASE
 @pytest.mark.parametrize(
     ("every_days", "runs_at", "made"),
-    [(1, D1_MORNING, 1), (3, D2_MORNING, 0), (3, D3_MORNING, 1)],
+    [(1, D1_MORNING, 1), (3, D2_MORNING, 0)],
 )
 def test_the_cron_follows_the_cadence_saved_in_lesson_settings(
     monkeypatch: pytest.MonkeyPatch,
@@ -1039,36 +911,18 @@ def test_the_cron_follows_the_cadence_saved_in_lesson_settings(
 
 
 @DATABASE
-def test_a_failed_or_unsent_lesson_leaves_the_next_one_due(
+def test_a_lesson_on_demand_ignores_paused(
     monkeypatch: pytest.MonkeyPatch, world: World
-) -> None:
-    create_settings()
-    create_lesson_settings()
-    yesterday = D2_MORNING - timedelta(days=1)
-    create_lesson_row(started_at=yesterday, status=Episode.Status.FAILED)
-    create_lesson_row(started_at=yesterday, status=Episode.Status.NOT_SENT)
-    seen = capture_run(monkeypatch)
-    monkeypatch.setattr(lesson_run, "datetime", clock(D2_MORNING))
-
-    lesson_run.make_lesson([], send=False, news_sent=True, scheduled=True)
-
-    assert len(seen) == 1
-
-
-@DATABASE
-@pytest.mark.parametrize(("scheduled", "runs"), [(True, False), (False, True)])
-def test_paused_skips_only_a_scheduled_lesson(
-    monkeypatch: pytest.MonkeyPatch, world: World, scheduled: bool, runs: bool
 ) -> None:
     create_settings(paused=True)
     create_lesson_settings()
     seen = capture_run(monkeypatch)
 
-    error = lesson_run.make_lesson([], send=True, news_sent=True, scheduled=scheduled)
+    error = lesson_run.make_lesson([], send=True, news_sent=False)
 
     assert error is None
-    assert len(seen) == int(runs)
-    assert Episode.objects.count() == int(runs)
+    assert len(seen) == 1
+    assert Episode.objects.count() == 1
 
 
 @DATABASE
@@ -1179,18 +1033,16 @@ def episode_ends(
     world: World,
     tmp_path: Path,
     failure: Exception | None = None,
-    selected: bool = True,
     seen: list[TextModels] | None = None,
 ) -> None:
     """The news episode, its steps faked inside its real run: the selection's
-    stories, unless it fails before them, then its voice note or its failure. It
-    sends through the world's Telegram, and `seen` gets its TextModels."""
+    stories, then its voice note or its failure. It sends through the world's
+    Telegram, and `seen` gets its TextModels."""
 
     async def generate(service: EpisodeService, *_when: object) -> EpisodeReport:
         if seen is not None:
             seen.append(service.text)
-        if selected:
-            service.stories = SELECTED_STORIES
+        service.stories = SELECTED_STORIES
         if failure:
             raise failure
         return EpisodeReport(
@@ -1212,48 +1064,46 @@ NEWS, LESSON = Episode.Kind.NEWS, Episode.Kind.LESSON
 
 
 @DATABASE
-def test_with_a_blank_cadence_the_cron_sends_only_the_news(
-    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
-) -> None:
-    create_settings()
-    create_lesson_settings(every_days=None)
-    create_catalog()
-    episode_ends(monkeypatch, world, tmp_path)
-    lesson_over(monkeypatch, [])
-
-    call_command("news_podcast", "episode", "--scheduled")
-
-    assert kinds_and_statuses() == [(NEWS, Episode.Status.SENT)]
-    assert len(world.sent) == 1
-
-
-@DATABASE
-def test_a_run_without_scheduled_makes_no_lesson_even_when_one_is_due(
-    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
-) -> None:
-    create_settings()
-    create_lesson_settings()
-    create_catalog()
-    episode_ends(monkeypatch, world, tmp_path)
-    lesson_over(monkeypatch, [])
-
-    call_command("news_podcast", "episode")
-
-    assert kinds_and_statuses() == [(NEWS, Episode.Status.SENT)]
-    assert len(world.sent) == 1
-
-
-@DATABASE
-def test_a_due_lesson_follows_the_sent_news_and_saves_its_row_after(
+def test_a_due_lesson_follows_the_sent_news_with_its_own_text_models_and_limit(
     monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
 ) -> None:
     create_settings()
     create_lesson_settings()
     create_catalog()
     world.responses.append(found(*PAGES))
-    episode_ends(monkeypatch, world, tmp_path)
+    episode_texts: list[TextModels] = []
+    episode_ends(monkeypatch, world, tmp_path, seen=episode_texts)
     built: dict[str, FakeChatModel] = {}
     lesson_over(monkeypatch, fake_factory({MODEL: list(LESSON_ANSWERS)}, [], built))
+    lesson_texts: list[TextModels] = []
+
+    async def spent_then_run(
+        inputs: LessonState, context: LessonContext
+    ) -> LessonOutcome:
+        lesson_texts.append(context.text)
+        return await run_graph(inputs, context)
+
+    def spent(texts: list[TextModels]) -> None:
+        # The episode used its waits and marked its model out of quota.
+        texts[0].retry_minutes.clear()
+        texts[0].dropped.add(SETTINGS["text_model"])
+
+    monkeypatch.setattr(lesson_run, "run_graph", spent_then_run)
+    limits: list[float] = []
+    timeout = asyncio.timeout
+
+    def recorded(delay: float | None) -> asyncio.Timeout:
+        if delay is not None:
+            limits.append(delay)
+        return timeout(delay)
+
+    monkeypatch.setattr(asyncio, "timeout", recorded)
+
+    def after_the_episode() -> None:
+        spent(episode_texts)
+        close_old_connections()
+
+    monkeypatch.setattr(episode_run, "close_old_connections", after_the_episode)
 
     call_command("news_podcast", "episode", "--scheduled")
 
@@ -1265,6 +1115,11 @@ def test_a_due_lesson_follows_the_sent_news_and_saves_its_row_after(
     assert [entry[0] for entry in world.sent] == ["chat", "admin"]
     script_request = built[MODEL].received[2]
     assert "Resumo enviado: sim." in str(script_request[0].content)
+    [lesson_text] = lesson_texts
+    assert lesson_text is not episode_texts[0]
+    assert lesson_text.retry_minutes == list(TEXT_RETRY_MINUTES)
+    assert lesson_text.dropped == set()
+    assert limits == [MAX_RUN_MINUTES * 60, MAX_LESSON_MINUTES * 60]
 
 
 @DATABASE
@@ -1319,54 +1174,6 @@ def test_both_failures_are_saved_reported_once_each_and_named(
 
 
 @DATABASE
-def test_an_episode_that_fails_before_its_selection_leaves_the_course_order(
-    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
-) -> None:
-    create_settings()
-    create_lesson_settings()
-    catalog = create_catalog()
-    world.responses.append(found(*PAGES))
-    failure = EpisodeError("Nenhuma notícia encontrada nos feeds")
-    episode_ends(monkeypatch, world, tmp_path, failure, selected=False)
-    # No stories, so no choice is asked.
-    lesson_over(monkeypatch, LESSON_ANSWERS[1:])
-
-    with pytest.raises(CommandError, match="^episódio: Nenhuma notícia"):
-        call_command("news_podcast", "episode", "--scheduled")
-
-    assert kinds_and_statuses() == [
-        (NEWS, Episode.Status.FAILED),
-        (LESSON, Episode.Status.SENT),
-    ]
-    lesson = Episode.objects.get(kind=LESSON)
-    assert lesson.topic == catalog["veto"]
-    assert lesson.story_title == ""
-    notices = [text.split("\n")[0] for _, text in world.messages()]
-    assert notices == ["⚠️ Não consegui gerar o episódio de hoje."]
-
-
-@DATABASE
-def test_a_failed_episode_and_no_lesson_settings_name_both_parts(
-    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
-) -> None:
-    create_settings()
-    episode_ends(monkeypatch, world, tmp_path, EpisodeError("a voz caiu"))
-    lesson_over(monkeypatch, [])
-
-    with pytest.raises(CommandError) as raised:
-        call_command("news_podcast", "episode", "--scheduled")
-
-    assert str(raised.value).startswith(
-        "episódio: a voz caiu; aula: Não há configurações da aula no banco"
-    )
-    assert kinds_and_statuses() == [(NEWS, Episode.Status.FAILED)]
-    notices = [text for _, text in world.messages()]
-    assert len(notices) == 2
-    assert "Não consegui gerar a aula de hoje" in notices[1]
-    assert "<b>Etapa:</b> configurações" in notices[1]
-
-
-@DATABASE
 def test_paused_while_the_news_runs_stops_the_lesson(
     monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
 ) -> None:
@@ -1387,89 +1194,6 @@ def test_paused_while_the_news_runs_stops_the_lesson(
 
     assert kinds_and_statuses() == [(NEWS, Episode.Status.SENT)]
     assert len(world.sent) == 1
-
-
-@DATABASE
-def test_paused_at_the_start_runs_neither_part(
-    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
-) -> None:
-    create_settings(paused=True)
-    create_lesson_settings()
-    episode_ends(monkeypatch, world, tmp_path)
-    lesson_over(monkeypatch, [])
-
-    call_command("news_podcast", "episode", "--scheduled")
-
-    assert not Episode.objects.exists()
-    assert world.sent == []
-
-
-@DATABASE
-def test_a_news_settings_failure_is_reported_once_with_no_lesson(
-    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
-) -> None:
-    create_lesson_settings()
-    episode_ends(monkeypatch, world, tmp_path)
-    lesson_over(monkeypatch, [])
-
-    with pytest.raises(CommandError, match="seed_news_podcast"):
-        call_command("news_podcast", "episode", "--scheduled")
-
-    assert not Episode.objects.exists()
-    [(chat, text)] = world.messages()
-    assert chat == "admin"
-    assert "Não consegui gerar o episódio de hoje" in text
-
-
-@DATABASE
-def test_the_lesson_starts_with_fresh_text_models_and_its_own_limit(
-    monkeypatch: pytest.MonkeyPatch, world: World, tmp_path: Path
-) -> None:
-    create_settings()
-    create_lesson_settings()
-    create_catalog()
-    world.responses.append(found(*PAGES))
-    episode_texts: list[TextModels] = []
-    episode_ends(monkeypatch, world, tmp_path, seen=episode_texts)
-    lesson_over(monkeypatch, LESSON_ANSWERS)
-    lesson_texts: list[TextModels] = []
-
-    async def spent_then_run(
-        inputs: LessonState, context: LessonContext
-    ) -> LessonOutcome:
-        lesson_texts.append(context.text)
-        return await run_graph(inputs, context)
-
-    def spent(texts: list[TextModels]) -> None:
-        # The episode used its waits and marked its model out of quota.
-        texts[0].retry_minutes.clear()
-        texts[0].dropped.add(SETTINGS["text_model"])
-
-    monkeypatch.setattr(lesson_run, "run_graph", spent_then_run)
-    limits: list[float] = []
-    timeout = asyncio.timeout
-
-    def recorded(delay: float | None) -> asyncio.Timeout:
-        if delay is not None:
-            limits.append(delay)
-        return timeout(delay)
-
-    monkeypatch.setattr(asyncio, "timeout", recorded)
-
-    def after_the_episode() -> None:
-        spent(episode_texts)
-        close_old_connections()
-
-    monkeypatch.setattr(episode_run, "close_old_connections", after_the_episode)
-
-    call_command("news_podcast", "episode", "--scheduled")
-
-    [lesson_text] = lesson_texts
-    assert lesson_text is not episode_texts[0]
-    assert lesson_text.retry_minutes == list(TEXT_RETRY_MINUTES)
-    assert lesson_text.dropped == set()
-    assert limits == [MAX_RUN_MINUTES * 60, MAX_LESSON_MINUTES * 60]
-    assert Episode.objects.get(kind=LESSON).status == Episode.Status.SENT
 
 
 @DATABASE

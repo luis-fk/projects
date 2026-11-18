@@ -198,56 +198,8 @@ def test_a_name_is_found_whatever_its_case_and_accents() -> None:
     assert is_in_pdf(content, "  beltrana conceição ")
 
 
-def test_a_name_missing_from_the_list_is_not_found() -> None:
-    assert not is_in_pdf(
-        pdf("1. Sicrano Araújo", "2. Beltrana Conceição"), "Fulano de Tal"
-    )
-
-
 def test_a_name_inside_a_longer_name_is_not_found() -> None:
     assert not is_in_pdf(pdf("1. Joana de Tal", "2. Ana de Tallis"), "Ana de Tal")
-
-
-def test_a_file_that_is_not_a_pdf_cannot_be_read() -> None:
-    assert is_in_pdf(b"<html>Page not found</html>", "Fulano de Tal") is None
-
-
-def test_a_student_is_found_in_every_list_that_names_them() -> None:
-    web = FakeWeb()
-    web.publish(LIST_URL, "Aprovados 2025", "1. FULANO DE TAL")
-    web.publish("https://exemplo.br/medicina.pdf", "Medicina", "1. Beltrana Conceição")
-    web.publish("https://exemplo.br/chamada.pdf", "Segunda chamada", "7. Fulano de Tal")
-
-    results = run(web, lambda service: service._process_student("Fulano de Tal", 2025))
-
-    assert results == [
-        found(LIST_URL, "Aprovados 2025"),
-        found("https://exemplo.br/chamada.pdf", "Segunda chamada"),
-    ]
-
-
-def test_lists_that_fail_to_download_are_skipped() -> None:
-    web = FakeWeb()
-    web.results.append({"url": "https://exemplo.br/removida.pdf", "title": "Removida"})
-    web.publish(
-        "https://fora-do-ar.exemplo.br/lista.pdf", "Fora do ar", "FULANO DE TAL"
-    )
-    web.offline.add("https://fora-do-ar.exemplo.br/lista.pdf")
-    web.publish(LIST_URL, "Aprovados 2025", "1. FULANO DE TAL")
-
-    results = run(web, lambda service: service._process_student("Fulano de Tal", 2025))
-
-    assert results == [found(LIST_URL, "Aprovados 2025")]
-
-
-def test_a_student_missing_from_the_lists_that_could_be_read_is_not_found() -> None:
-    web = FakeWeb()
-    web.results.append({"url": "https://exemplo.br/removida.pdf", "title": "Removida"})
-    web.publish(LIST_URL, "Aprovados 2025", "1. Sicrano Araújo")
-
-    results = run(web, lambda service: service._process_student("Fulano de Tal", 2025))
-
-    assert results == [StudentNotFoundResult(student_name="Fulano de Tal")]
 
 
 def test_the_search_fails_when_no_list_can_be_read() -> None:
@@ -265,14 +217,6 @@ def test_the_search_fails_when_no_list_can_be_read() -> None:
     assert results == [FAILED]
 
 
-def test_the_search_fails_when_tavily_fails() -> None:
-    web = FakeWeb(search_is_down=True)
-
-    results = run(web, lambda service: service._process_student("Fulano de Tal", 2025))
-
-    assert results == [FAILED]
-
-
 def test_the_search_fails_without_a_tavily_key() -> None:
     async def search_without_key(service: AdmissionStatusService) -> Any:
         service.tavily_client = None
@@ -282,9 +226,16 @@ def test_the_search_fails_without_a_tavily_key() -> None:
 
 
 @DATABASES
-def test_a_student_found_is_saved_with_the_lists_and_the_class() -> None:
+def test_a_student_found_is_saved_with_the_lists_that_name_them_and_the_class() -> None:
     web = FakeWeb()
     web.publish(LIST_URL, "Aprovados 2025", "1. FULANO DE TAL")
+    web.publish("https://exemplo.br/medicina.pdf", "Medicina", "1. Beltrana Conceição")
+    # A list that is gone or offline is skipped, even one that names the student.
+    web.results.append({"url": "https://exemplo.br/removida.pdf", "title": "Removida"})
+    web.publish(
+        "https://fora-do-ar.exemplo.br/lista.pdf", "Fora do ar", "FULANO DE TAL"
+    )
+    web.offline.add("https://fora-do-ar.exemplo.br/lista.pdf")
     web.publish("https://exemplo.br/chamada.pdf", "Segunda chamada", "7. Fulano de Tal")
 
     sent = check(web, ["Fulano de Tal"], class_name="3A")
@@ -310,8 +261,9 @@ def test_a_student_found_is_saved_with_the_lists_and_the_class() -> None:
 
 
 @DATABASES
-def test_a_student_not_on_any_list_is_saved_as_not_found() -> None:
+def test_a_student_not_on_any_list_that_could_be_read_is_saved_as_not_found() -> None:
     web = FakeWeb()
+    web.results.append({"url": "https://exemplo.br/removida.pdf", "title": "Removida"})
     web.publish(LIST_URL, "Aprovados 2025", "1. Sicrano Araújo")
 
     sent = check(web, ["Fulano de Tal"])

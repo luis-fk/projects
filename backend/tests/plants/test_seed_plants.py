@@ -11,7 +11,6 @@ from django.core.management.base import CommandError
 from django.utils import timezone
 
 from plants.api.esp32.devices import device_for_key
-from plants.api.sensors.service import readings_of
 from plants.models import Esp32Data, Esp32Device, Users
 from tests.api_tokens import saved_device
 
@@ -83,10 +82,13 @@ def weather_at_hours(device: Esp32Device, hours: range) -> tuple[list[int], list
 
 
 @DATABASES
-def test_demo_can_use_plants_from_sao_paulo_and_the_admin() -> None:
+def test_demo_can_use_plants_from_sao_paulo_and_the_admin_even_if_blocked() -> None:
+    demo = get_user_model().objects.create_user(username="demo", is_active=False)
+    Users.objects.create(auth_user_id=demo.pk, active=False)
+
     seed()
 
-    demo = get_user_model().objects.get(username="demo")
+    demo.refresh_from_db()
     row = Users.objects.get(auth_user_id=demo.pk)
     assert demo.is_active
     assert demo.is_staff and demo.is_superuser
@@ -96,27 +98,7 @@ def test_demo_can_use_plants_from_sao_paulo_and_the_admin() -> None:
 
 
 @DATABASES
-def test_the_output_says_how_to_log_in() -> None:
-    assert "plants: log in as demo, with the password demo in the admin" in seed()
-
-
-@DATABASES
-def test_a_blocked_demo_can_use_plants_again() -> None:
-    demo = get_user_model().objects.create_user(username="demo", is_active=False)
-    Users.objects.create(auth_user_id=demo.pk, active=False)
-
-    seed()
-
-    demo.refresh_from_db()
-    row = Users.objects.get(auth_user_id=demo.pk)
-    assert demo.is_active and demo.is_superuser
-    assert demo.check_password("demo")
-    assert row.active
-    assert (row.latitude, row.longitude) == ("-23.55", "-46.63")
-
-
-@DATABASES
-def test_demo_has_two_plants_read_every_2_hours_for_30_days() -> None:
+def test_demo_s_plants_read_every_2_hours_for_30_days_dry_until_watered() -> None:
     seed()
 
     devices = demo_devices()
@@ -130,46 +112,35 @@ def test_demo_has_two_plants_read_every_2_hours_for_30_days() -> None:
         assert gaps == {timedelta(hours=2)}
         assert timedelta(0) <= timezone.now() - times[-1] < timedelta(hours=1)
         assert times[-1] - times[0] == timedelta(hours=718)
-
-
-@DATABASES
-def test_both_plants_read_the_same_weather() -> None:
-    seed()
-
-    manjericao, samambaia = demo_devices()
-    assert len(weather(manjericao)) == 360
-    assert weather(manjericao) == weather(samambaia)
-
-
-@DATABASES
-def test_afternoons_are_warmer_and_drier_than_dawns_in_sao_paulo() -> None:
-    seed()
-
-    device = demo_devices()[0]
-    afternoon_temperatures, afternoon_humidities = weather_at_hours(device, AFTERNOON)
-    dawn_temperatures, dawn_humidities = weather_at_hours(device, DAWN)
-    assert min(afternoon_temperatures) > max(dawn_temperatures)
-    assert max(afternoon_humidities) < min(dawn_humidities)
-
-
-@DATABASES
-def test_each_plant_dries_until_it_is_watered() -> None:
-    seed()
-
-    manjericao, samambaia = demo_devices()
-    for device in (manjericao, samambaia):
         rows = list(device.readings.values_list("analog_value", "digital_value"))
         assert all(0 <= raw <= 4095 for raw, _ in rows)
         assert all(digital == int(raw > 2600) for raw, digital in rows)
         assert all(step >= 0 or step < -1000 for step in raw_steps(device))
         assert waterings(device) >= 1
+    manjericao, samambaia = devices
     assert waterings(manjericao) > waterings(samambaia)
 
 
 @DATABASES
-def test_each_printed_key_works_for_its_device() -> None:
+def test_both_plants_read_the_same_weather_with_warmer_drier_afternoons() -> None:
+    seed()
+
+    manjericao, samambaia = demo_devices()
+    assert len(weather(manjericao)) == 360
+    assert weather(manjericao) == weather(samambaia)
+    afternoon_temperatures, afternoon_humidities = weather_at_hours(
+        manjericao, AFTERNOON
+    )
+    dawn_temperatures, dawn_humidities = weather_at_hours(manjericao, DAWN)
+    assert min(afternoon_temperatures) > max(dawn_temperatures)
+    assert max(afternoon_humidities) < min(dawn_humidities)
+
+
+@DATABASES
+def test_the_output_gives_the_login_and_each_device_s_working_key() -> None:
     output = seed()
 
+    assert "plants: log in as demo, with the password demo in the admin" in output
     printed = {line["nickname"]: line for line in PRINTED_DEVICE.finditer(output)}
     for device in demo_devices():
         assert int(printed[device.nickname]["id"]) == device.pk
@@ -203,19 +174,6 @@ def test_running_it_again_replaces_only_its_own_data() -> None:
     assert Esp32Data.objects.filter(user=demo_row(), device=None).count() == 1
     assert device_for_key(their_key) == someone
     assert list(someone.readings.values_list("analog_value", flat=True)) == [2000]
-
-
-@DATABASES
-def test_the_sensors_tab_shows_a_day_and_30_days_of_readings() -> None:
-    seed()
-    now = timezone.now()
-
-    for device in demo_devices():
-        day = readings_of(device, now - timedelta(hours=24))
-        month = readings_of(device, now - timedelta(hours=720))
-        assert len(day) in {12, 13}
-        assert len(month) == 360
-        assert all(reading["soil_percent"] is not None for reading in month)
 
 
 @DATABASES

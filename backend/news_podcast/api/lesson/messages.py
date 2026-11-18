@@ -6,72 +6,23 @@ import logging
 import math
 from collections.abc import Sequence
 
-from news_podcast.api.core.telegram import CAPTION_LIMIT, TelegramClient, TelegramError
+from news_podcast.api.core.telegram import TelegramClient, TelegramError
 from news_podcast.api.lesson.config import (
     LESSON_MINUTES_LIMIT,
     LESSON_WORDS_PER_MINUTE,
     MIN_LESSON_PAGES,
 )
-from news_podcast.api.lesson.schemas import CatalogTopic, LessonPage
+from news_podcast.api.lesson.schemas import CatalogTopic
 from news_podcast.api.lesson.state import Warn
 
 logger = logging.getLogger(__name__)
 
 FAILURE_SUBJECT = "a aula de hoje"
-LINK_PREFIX = "• "
 
 
-def lesson_caption(topic: CatalogTopic, pages: Sequence[LessonPage]) -> str:
-    """The topic, its area and a link to each page. Telegram counts the caption's
-    visible text, so the URLs inside href don't count: the titles share what the head
-    leaves, each cut before it is escaped, so a cut never splits an entity. The admin
-    caps the topic's and the area's lengths, so the head always leaves each title room
-    for at least its site's name."""
-    head = f"🎓 Aula · {topic.title}\n{topic.area}\n\nFontes:"
-    left = CAPTION_LIMIT - telegram_length(head)
-    room = left // max(len(pages), 1) - telegram_length(f"\n{LINK_PREFIX}")
-    lines = [
-        f"🎓 <b>Aula · {html.escape(topic.title)}</b>",
-        f"<i>{html.escape(topic.area)}</i>",
-        "",
-        "Fontes:",
-        *(
-            f'{LINK_PREFIX}<a href="{html.escape(page.url, quote=True)}">'
-            f"{html.escape(link_text(page, room))}</a>"
-            for page in pages
-        ),
-    ]
-    return "\n".join(lines)
-
-
-def link_text(page: LessonPage, room: int) -> str:
-    """The page's title, cut to the room. With less room than the site's name, the
-    link shows the site's name, so it still says where it goes."""
-    title = page.title.strip()
-    if not title:
-        return page.site
-    if telegram_length(title) <= max(room, telegram_length(page.site)):
-        return title
-    if room < telegram_length(page.site):
-        return page.site
-    return cut(title, room)
-
-
-def cut(text: str, room: int) -> str:
-    """The text cut to `room` units, the ellipsis included."""
-    kept: list[str] = []
-    used = telegram_length("…")
-    for character in text:
-        used += telegram_length(character)
-        if used > room:
-            break
-        kept.append(character)
-    return "".join(kept) + "…"
-
-
-def telegram_length(text: str) -> int:
-    """Telegram counts text in UTF-16 code units, so an emoji can count twice."""
-    return len(text.encode("utf-16-le")) // 2
+def lesson_caption(topic: CatalogTopic) -> str:
+    """One line, like the daily's: the topic, with no sources."""
+    return f"🎓 <b>Aula · {html.escape(topic.title)}</b>"
 
 
 def skipped_warning(titles: Sequence[str]) -> str:

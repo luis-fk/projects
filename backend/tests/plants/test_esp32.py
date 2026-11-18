@@ -75,10 +75,13 @@ def list_readings(client: Client, key: str) -> tuple[int, Any]:
 
 
 @DATABASES
-def test_a_reading_that_is_not_json_gets_400(client: Client) -> None:
+def test_a_bad_reading_gets_400_and_saves_nothing(client: Client) -> None:
     _, key = saved_device()
 
     assert send_reading(client, "umidade=512", key) == (400, {"error": "Invalid JSON"})
+    status, errors = send_reading(client, {"analogValue": 2310}, key)
+    assert (status, list(errors)) == (400, ["digitalValue"])
+    assert not Esp32Data.objects.exists()
 
 
 @DATABASES
@@ -86,8 +89,10 @@ def test_a_reading_is_saved_with_its_device_its_owner_and_the_weather(
     client: Client, open_weather: FakeOpenWeather
 ) -> None:
     device, key = saved_device()
+    other, _ = saved_device("Samambaia")
 
-    assert send_reading(client, READING, key) == (200, {})
+    # The owner comes from the device key: a userId in the body is ignored.
+    assert send_reading(client, {**READING, "userId": other.user_id}, key) == (200, {})
 
     reading = Esp32Data.objects.get()
     assert (reading.device_id, reading.user_id) == (device.pk, device.user_id)
@@ -101,18 +106,6 @@ def test_a_reading_is_saved_with_its_device_its_owner_and_the_weather(
         "units": "metric",
         "appid": "weather-key",
     }
-
-
-@DATABASES
-def test_a_user_id_in_the_body_is_ignored(
-    client: Client, open_weather: FakeOpenWeather
-) -> None:
-    device, key = saved_device()
-    other, _ = saved_device("Samambaia")
-
-    assert send_reading(client, {**READING, "userId": other.user_id}, key) == (200, {})
-
-    assert Esp32Data.objects.get().user_id == device.user_id
 
 
 @DATABASES

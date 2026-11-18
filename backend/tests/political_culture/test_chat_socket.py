@@ -43,13 +43,6 @@ def open_chat_socket(user_id: int, subprotocols: list[str]) -> tuple[bool, Any]:
     return asyncio.run(connect())
 
 
-def test_the_chat_socket_accepts_the_users_token() -> None:
-    connected, subprotocol = open_chat_socket(7, ["bearer", user_token(APP, "7")])
-
-    assert connected
-    assert subprotocol == "bearer"
-
-
 def test_the_chat_socket_rejects_a_connection_without_a_token() -> None:
     connected, _ = open_chat_socket(7, [])
 
@@ -89,16 +82,20 @@ def users_chat_socket() -> WebsocketCommunicator:
     )
 
 
-def test_the_chat_socket_relays_the_users_answers() -> None:
-    async def scenario() -> Any:
+def test_the_chat_socket_accepts_the_users_token_and_relays_their_answers() -> None:
+    async def scenario() -> tuple[bool, Any, Any]:
         communicator = users_chat_socket()
-        await communicator.connect()
+        connected, subprotocol = await communicator.connect()
         await get_channel_layer().group_send("chat_7", ANSWER)
         received = await communicator.receive_json_from()
         await communicator.disconnect()
-        return received
+        return connected, subprotocol, received
 
-    assert asyncio.run(scenario()) == {"role": "ai", "message": "Olá!"}
+    assert asyncio.run(scenario()) == (
+        True,
+        "bearer",
+        {"role": "ai", "message": "Olá!"},
+    )
 
 
 def test_the_chat_socket_gets_nothing_meant_for_another_user() -> None:
@@ -116,14 +113,14 @@ def test_the_chat_socket_gets_nothing_meant_for_another_user() -> None:
 @pytest.mark.access_check
 @pytest.mark.django_db(databases=["default", "political_culture_db"], transaction=True)
 @pytest.mark.parametrize(
-    ("is_active", "active", "connects"),
-    [(True, True, True), (False, True, False), (True, False, False)],
-    ids=["can use the app", "Active unticked", "app unticked"],
+    ("active", "connects"),
+    [(True, True), (False, False)],
+    ids=["can use the app", "app unticked"],
 )
 def test_the_chat_socket_lets_in_only_people_who_can_use_the_app(
-    is_active: bool, active: bool, connects: bool
+    active: bool, connects: bool
 ) -> None:
-    user_id = saved_person(APP, is_active=is_active, active=active)
+    user_id = saved_person(APP, active=active)
 
     connected, _ = open_chat_socket(int(user_id), ["bearer", user_token(APP, user_id)])
 

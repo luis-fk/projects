@@ -61,20 +61,14 @@ def test_a_video_page_has_a_video_segment_in_its_path() -> None:
     assert not is_video_page(SBT_LINK)
 
 
-def test_pick_items_reads_icl_first_then_open_sites_once_per_outlet() -> None:
+def test_a_story_reads_icl_then_one_open_site_per_outlet_and_lists_the_rest() -> None:
     story = SelectedStory(title="x", item_ids=["1", "2", "3", "4", "5", "6"])
 
     picked = pick_items(story, ITEMS, {})
+    headlines = other_headlines(story, picked, ITEMS)
 
     assert [item.id for item in picked] == ["4", "2", "5"]
-
-
-def test_a_video_page_is_not_picked_for_reading() -> None:
-    story = SelectedStory(title="x", item_ids=["7", "2", "5", "1"])
-
-    picked = pick_items(story, ITEMS, {SBT_LINK: SBT_VIDEO})
-
-    assert [item.id for item in picked] == ["2", "5", "1"]
+    assert [headline.outlet for headline in headlines] == ["Folha", "Estadão"]
 
 
 def test_a_video_page_leaves_its_slot_to_another_outlet(
@@ -97,11 +91,3 @@ def test_a_video_page_leaves_its_slot_to_another_outlet(
             return [source.outlet for source in brief.sources]
 
     assert asyncio.run(scenario()) == ["g1", "Poder360", "Folha"]
-
-
-def test_other_headlines_cover_the_outlets_not_read() -> None:
-    story = SelectedStory(title="x", item_ids=["1", "2", "3", "4", "5", "6"])
-
-    headlines = other_headlines(story, pick_items(story, ITEMS, {}), ITEMS)
-
-    assert [headline.outlet for headline in headlines] == ["Folha", "Estadão"]

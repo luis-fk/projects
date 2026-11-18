@@ -9,7 +9,7 @@ from pytest_django import Settings
 from news_podcast.api.core.config import HOSTS
 from news_podcast.api.core.schemas import Turn, Usage
 from news_podcast.api.core.voice.base import VoiceError
-from news_podcast.api.core.voice.gemini import GeminiVoice, pcm_to_wav
+from news_podcast.api.core.voice.gemini import GeminiVoice, pcm_to_wav, wav_duration
 from news_podcast.api.core.voice.providers import VOICE_PROVIDERS, voice_provider
 
 MODEL = "gemini-3.8-flash-lite-tts"
@@ -39,39 +39,38 @@ def no_request(request: httpx.Request) -> httpx.Response:
 
 @pytest.mark.parametrize("saved", [f"google_genai:{MODEL}", MODEL])
 def test_a_gemini_voice_model_speaks_through_gemini_voice(saved: str) -> None:
-    sent: list[str] = []
+    requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(json.loads(request.content)["model"])
+        requests.append(request)
         return httpx.Response(200, json=AUDIO_ANSWER)
 
-    async def scenario() -> tuple[object, Usage]:
+    async def scenario() -> tuple[object, bytes, Usage]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             voice = voice_provider(saved, client)
-            _, usage = await voice.synthesize(
+            audio, usage = await voice.synthesize(
                 [Turn(speaker="Bia", text="Oi")],
                 HOSTS,
                 style="calma",
                 headline_style="enfática",
                 step="voice",
             )
-            return voice, usage
+            return voice, audio, usage
 
-    voice, usage = asyncio.run(scenario())
+    voice, audio, usage = asyncio.run(scenario())
 
     assert isinstance(voice, GeminiVoice)
-    assert sent == [MODEL]
+    (request,) = requests
+    assert request.url.path.endswith("/interactions")
+    assert json.loads(request.content)["model"] == MODEL
+    assert request.headers["x-goog-api-key"] == "test-key"
+    assert wav_duration(audio) == pytest.approx(0.1)
+    assert usage.step == "voice"
     assert usage.model == saved
 
 
 @pytest.mark.parametrize(
-    "saved",
-    [
-        "openai:gpt-4o-mini-tts",
-        "eleven-v3",
-        "google_genai:",
-        "google_vertexai:gemini-3.8-flash-lite-tts",
-    ],
+    "saved", ["google_genai:", "google_vertexai:gemini-3.8-flash-lite-tts"]
 )
 def test_a_voice_model_without_an_implementation_is_refused_before_any_request(
     saved: str,

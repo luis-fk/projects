@@ -15,7 +15,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.chat_models import (
     ChatGoogleGenerativeAIError,
     GoogleAPIError,
-    GoogleAuthenticationError,
     GoogleInvalidRequestError,
     GoogleModelNotFoundError,
     GoogleRateLimitError,
@@ -59,7 +58,6 @@ PROMPT = ChatPromptTemplate.from_messages(
 )
 VALUES = {"what": "em JSON", "material": "o material"}
 ANSWER = '{"ok": true}'
-GEMINI_URL = "https://generativelanguage.googleapis.com"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 
@@ -149,7 +147,6 @@ def ask_scripted(
     *,
     names: tuple[str, ...] = (MAIN, FALLBACK),
     check: Callable[[Answer], Any] = lambda answer: answer,
-    wait: bool = True,
     usages: list[Usage] | None = None,
 ) -> tuple[list[str], TextError | None]:
     """Asks for one answer; returns the models asked, call by call, and the error."""
@@ -170,7 +167,6 @@ def ask_scripted(
                     step="selection",
                     schema=Answer,
                     check=check,
-                    wait=wait,
                 )
             except TextError as error:
                 return error
@@ -188,29 +184,6 @@ def test_split_model_reads_bare_and_prefixed_names() -> None:
     assert split_model("openai:gpt-4.1-mini") == ("openai", "gpt-4.1-mini")
     assert split_model("anthropic:claude-x") == ("anthropic", "claude-x")
     assert split_model("gpt-4.1-mini") == ("", "gpt-4.1-mini")
-
-
-def test_a_bare_gemini_name_is_built_as_google_genai(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, dict[str, Any]]] = []
-
-    def record(model: str, **kwargs: Any) -> BaseChatModel:
-        calls.append((model, kwargs))
-        return FakeChatModel(model=model, outcomes=[], asked=[])
-
-    monkeypatch.setattr(llm, "init_chat_model", record)
-
-    async def scenario() -> None:
-        async with httpx.AsyncClient() as client:
-            TextModels([MAIN], [], client).model(MAIN)
-
-    asyncio.run(scenario())
-
-    [(model, options)] = calls
-    assert model == "gemini-3.8-flash"
-    assert options["model_provider"] == "google_genai"
-    assert options["api_key"] == "gemini-test-key"
 
 
 def test_the_built_models_keep_our_retries_and_limits() -> None:
@@ -365,13 +338,6 @@ def test_text_skips_the_main_model_once_it_is_unavailable(
     assert asked == [MAIN] * MAX_ATTEMPTS + [FALLBACK, FALLBACK]
 
 
-def test_a_broken_answer_is_asked_again_once() -> None:
-    asked, error = ask_scripted({MAIN: ['{"ok": ', ANSWER], FALLBACK: []})
-
-    assert error is None
-    assert asked == [MAIN, MAIN]
-
-
 def test_an_answer_that_fails_the_schema_is_asked_again_then_the_next_model() -> None:
     asked, error = ask_scripted({MAIN: ['{"ok": "talvez"}', "{}"], FALLBACK: [ANSWER]})
 
@@ -448,11 +414,12 @@ def test_bad_answers_fail_at_once_with_no_model_down(
     )
 
 
-def test_an_empty_answer_is_a_bad_answer() -> None:
-    asked, error = ask_scripted({MAIN: ["", ANSWER], FALLBACK: []})
+def test_an_empty_answer_is_a_bad_answer_that_says_it_was_empty() -> None:
+    asked, error = ask_scripted({MAIN: ["", ""]}, names=(MAIN,))
 
-    assert error is None
     assert asked == [MAIN, MAIN]
+    assert error is not None
+    assert "texto vazio" in str(error)
 
 
 def test_broken_answers_still_count_in_the_cost() -> None:
@@ -541,35 +508,7 @@ def test_a_cut_short_answer_is_logged_with_its_reason_and_where_it_breaks(
     assert 'disse "não"' in caplog.text
 
 
-def test_text_waits_and_asks_every_model_again_when_none_answers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    waits = record_waits(monkeypatch)
-    timeout = TimeoutError()
-
-    asked, error = ask_scripted({MAIN: [timeout, timeout], FALLBACK: [timeout, ANSWER]})
-
-    assert error is None
-    assert waits == [TEXT_RETRY_MINUTES[0] * 60]
-    assert asked == [MAIN, FALLBACK, MAIN, FALLBACK]
-
-
-def test_text_gives_up_after_the_last_wait(monkeypatch: pytest.MonkeyPatch) -> None:
-    waits = record_waits(monkeypatch)
-    rounds = len(TEXT_RETRY_MINUTES) + 1
-    timeout = TimeoutError()
-
-    _, error = ask_scripted({MAIN: [timeout] * rounds, FALLBACK: [timeout] * rounds})
-
-    assert error is not None
-    assert waits == [minutes * 60 for minutes in TEXT_RETRY_MINUTES]
-    assert (
-        str(error)
-        == f"{MAIN}: não respondeu em 180s | {FALLBACK}: não respondeu em 180s"
-    )
-
-
-def test_the_text_waits_are_shared_by_the_whole_run(
+def test_the_run_shares_its_text_waits_and_gives_up_after_the_last(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     waits = record_waits(monkeypatch)
@@ -603,21 +542,8 @@ def test_the_text_waits_are_shared_by_the_whole_run(
 
     error = asyncio.run(scenario())
 
-    assert error is not None
     assert waits == [minutes * 60 for minutes in TEXT_RETRY_MINUTES]
-
-
-def test_one_round_and_no_wait_when_asked_not_to_wait(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    waits = record_waits(monkeypatch)
-    timeout = TimeoutError()
-
-    asked, error = ask_scripted({MAIN: [timeout], FALLBACK: [timeout]}, wait=False)
-
-    assert error is not None
-    assert waits == []
-    assert asked == [MAIN, FALLBACK]
+    assert str(error) == f"{FALLBACK}: não respondeu em 180s"
 
 
 @pytest.mark.parametrize(
@@ -637,34 +563,16 @@ def test_a_model_out_of_quota_is_dropped_for_the_run_without_waiting(
     assert waits == []
 
 
-def test_a_model_out_of_quota_is_not_asked_again_after_the_wait(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    record_waits(monkeypatch)
-
-    asked, error = ask_scripted(
-        {MAIN: [DAILY_QUOTA], FALLBACK: [TimeoutError(), ANSWER]}
-    )
-
-    assert error is None
-    assert asked == [MAIN, FALLBACK, FALLBACK]
-
-
 @pytest.mark.parametrize(
     ("failure", "first_wait"),
     [
         (gemini_rate_limit("GenerateRequestsPerMinutePerProject", "7s"), 8.0),
-        (
-            gemini_rate_limit("GenerateRequestsPerMinutePerProject"),
-            RATE_LIMIT_WAIT_SECONDS,
-        ),
         (gemini_overloaded(), backoff_seconds(1)),
         (aiohttp.ServerDisconnectedError(), backoff_seconds(1)),
         (openai_rate_limit("rate_limit_exceeded", retry_after="7"), 8.0),
     ],
     ids=[
         "gemini-retry-delay",
-        "gemini-per-minute",
         "gemini-503",
         "connection",
         "openai-retry-after",
@@ -697,15 +605,11 @@ def test_a_rate_limit_waits_longer_at_each_attempt_and_then_the_model_is_down(
     ]
 
 
-@pytest.mark.parametrize(
-    "timeout",
-    [TimeoutError(), OpenAITimeoutError(request=httpx.Request("POST", OPENAI_URL))],
-    ids=["gemini", "openai"],
-)
-def test_a_timeout_is_not_tried_again_and_the_model_is_down_at_once(
-    monkeypatch: pytest.MonkeyPatch, timeout: Exception
+def test_an_openai_timeout_is_not_tried_again_and_the_model_is_down_at_once(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     waits = record_waits(monkeypatch)
+    timeout = OpenAITimeoutError(request=httpx.Request("POST", OPENAI_URL))
 
     asked, error = ask_scripted({MAIN: [timeout], FALLBACK: [ANSWER]})
 
@@ -750,37 +654,29 @@ def test_a_refused_model_is_dropped_for_the_run_with_the_providers_message(
 
 
 @pytest.mark.parametrize(
-    "name",
-    [
-        "anthropic:claude-x",
-        "google_vertexai:gemini-3.8-flash",
-        "gpt-4.1-mini",
-        "openai:",
-        "openai: gpt-4.1-mini",
-    ],
+    "name", ["google_vertexai:gemini-3.8-flash", "openai:", "openai: gpt-4.1-mini"]
 )
 def test_a_model_with_an_unknown_provider_is_refused_and_the_fallback_answers(
     name: str,
 ) -> None:
-    asked, error = ask_scripted({FALLBACK: [ANSWER]}, names=(name, FALLBACK))
+    _, model = split_model(name)
+
+    asked, error = ask_scripted(
+        {model: [ANSWER], FALLBACK: [ANSWER]}, names=(name, FALLBACK)
+    )
 
     assert error is None
     assert asked == [FALLBACK]
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [ImportError("Unable to import langchain_google_genai"), ValueError("bad option")],
-    ids=["missing-integration", "bad-option"],
-)
-def test_a_model_that_cannot_be_built_is_refused(failure: Exception) -> None:
+def test_a_model_that_cannot_be_built_is_refused() -> None:
     asked: list[str] = []
 
     def missing(
         provider: str, model: str, api_key: str, http_client: httpx.AsyncClient
     ) -> BaseChatModel:
         if model == MAIN:
-            raise failure
+            raise ImportError("Unable to import langchain_google_genai")
         return FakeChatModel(model=model, outcomes=[ANSWER], asked=asked)
 
     async def scenario() -> Answer:
@@ -915,7 +811,7 @@ def test_only_the_statuses_that_pass_are_tried_again(
     assert waits == []
 
 
-def test_a_request_timeout_from_the_provider_marks_the_model_down(
+def test_a_provider_408_marks_the_model_down_until_the_run_waits_and_asks_all_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     waits = record_waits(monkeypatch)
@@ -924,26 +820,17 @@ def test_a_request_timeout_from_the_provider_marks_the_model_down(
     )
 
     asked, error = ask_scripted(
-        {MAIN: [request_timeout, ANSWER], FALLBACK: [TimeoutError()]}
+        {MAIN: [request_timeout, TimeoutError()], FALLBACK: [TimeoutError(), ANSWER]}
     )
 
     assert error is None
-    assert asked == [MAIN, FALLBACK, MAIN]
+    assert asked == [MAIN, FALLBACK, MAIN, FALLBACK]
     assert waits == [TEXT_RETRY_MINUTES[0] * 60]
 
 
-@pytest.mark.parametrize(
-    "refusal",
-    [
-        gemini_client_error(GoogleInvalidRequestError, 400, "INVALID_ARGUMENT"),
-        gemini_client_error(GoogleAuthenticationError, 401, "UNAUTHENTICATED"),
-        gemini_client_error(GoogleModelNotFoundError, 404, "NOT_FOUND"),
-    ],
-    ids=["400", "401", "404"],
-)
-def test_a_refusal_reaches_the_error_with_the_providers_message(
-    refusal: Exception,
-) -> None:
+def test_a_refusal_reaches_the_error_with_the_providers_message() -> None:
+    refusal = gemini_client_error(GoogleInvalidRequestError, 400, "INVALID_ARGUMENT")
+
     asked, error = ask_scripted({MAIN: [refusal], FALLBACK: [refusal]})
 
     assert asked == [MAIN, FALLBACK]

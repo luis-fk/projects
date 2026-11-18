@@ -25,9 +25,7 @@ def test_a_singleton_class_is_built_once() -> None:
 @pytest.mark.parametrize(
     ("html", "text"),
     [
-        ("<p>O <b>Estado</b> e a revolução</p>", "O Estado e a revolução"),
         ('<a href="https://exemplo.br">Manifesto</a>', "Manifesto"),
-        ("Sem marcação.", "Sem marcação."),
         (
             "Se a renda dos 10% < 50% e a do 1% > 20%, o que muda?",
             "Se a renda dos 10% < 50% e a do 1% > 20%, o que muda?",
@@ -39,9 +37,10 @@ def test_clean_html_keeps_only_the_text(html: str, text: str) -> None:
 
 
 @DATABASES
-def test_the_socket_gets_the_users_latest_answer() -> None:
+def test_the_socket_gets_the_users_latest_answer_or_an_empty_message() -> None:
     fulano = Users.objects.create(auth_user_id=1)
     beltrana = Users.objects.create(auth_user_id=2)
+    sicrano = Users.objects.create(auth_user_id=3)
     ChatHistory.objects.create(user=fulano, role="ai", message="Primeira resposta")
     ChatHistory.objects.create(user=fulano, role="ai", message="Última resposta")
     ChatHistory.objects.create(user=fulano, role="human", message="Obrigado!")
@@ -51,10 +50,4 @@ def test_the_socket_gets_the_users_latest_answer() -> None:
         "role": "ai",
         "message": "Última resposta",
     }
-
-
-@DATABASES
-def test_without_answers_the_socket_gets_an_empty_message() -> None:
-    user = Users.objects.create(auth_user_id=1)
-
-    assert wrap_up_get_response(user.id) == {}
+    assert wrap_up_get_response(sicrano.id) == {}

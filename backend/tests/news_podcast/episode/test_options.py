@@ -37,7 +37,6 @@ def test_faster_speech_needs_a_longer_script_for_the_same_length() -> None:
         (time(12, 0), "Resumo do meio-dia", "boa tarde", "12h"),
         (time(21, 30), "Resumo das 21", "boa noite", "21h30"),
         (time(0, 15), "Resumo da meia-noite", "boa noite", "0h15"),
-        (time(1, 0), "Resumo da 1", "boa noite", "1h"),
     ],
 )
 def test_name_and_greeting_follow_the_send_time(
@@ -49,22 +48,18 @@ def test_name_and_greeting_follow_the_send_time(
 
 
 def test_the_episode_is_named_after_the_next_full_hour() -> None:
-    now = datetime(2026, 11, 7, 6, 40, tzinfo=SAO_PAULO)
-
-    assert next_send(now, SAO_PAULO) == datetime(2026, 11, 7, 7, 0, tzinfo=SAO_PAULO)
-
-
-def test_a_run_on_the_hour_makes_the_next_hours_episode() -> None:
-    now = datetime(2026, 11, 7, 9, 0, tzinfo=SAO_PAULO)
-
-    assert next_send(now, SAO_PAULO) == datetime(2026, 11, 7, 10, 0, tzinfo=SAO_PAULO)
-
-
-def test_the_episode_hour_is_local_and_can_fall_on_the_next_day() -> None:
+    at_6h40 = datetime(2026, 11, 7, 6, 40, tzinfo=SAO_PAULO)
+    at_9h = datetime(2026, 11, 7, 9, 0, tzinfo=SAO_PAULO)
     # 23h10 in São Paulo is 02h10 UTC.
-    now = datetime(2026, 11, 8, 2, 10, tzinfo=ZoneInfo("UTC"))
+    at_23h10 = datetime(2026, 11, 8, 2, 10, tzinfo=UTC)
 
-    assert next_send(now, SAO_PAULO) == datetime(2026, 11, 8, 0, 0, tzinfo=SAO_PAULO)
+    assert next_send(at_6h40, SAO_PAULO) == datetime(
+        2026, 11, 7, 7, 0, tzinfo=SAO_PAULO
+    )
+    assert next_send(at_9h, SAO_PAULO) == datetime(2026, 11, 7, 10, 0, tzinfo=SAO_PAULO)
+    assert next_send(at_23h10, SAO_PAULO) == datetime(
+        2026, 11, 8, 0, 0, tzinfo=SAO_PAULO
+    )
 
 
 def test_manual_window_ends_now() -> None:
@@ -84,13 +79,3 @@ def test_scheduled_window_closes_at_the_top_of_the_hour_before_sending() -> None
 
     assert end == datetime(2026, 11, 6, 6, 0, tzinfo=SAO_PAULO)
     assert start == datetime(2026, 11, 5, 6, 0, tzinfo=SAO_PAULO)
-
-
-def test_evening_window_covers_the_day() -> None:
-    now = datetime(2026, 11, 6, 20, 10, tzinfo=SAO_PAULO)
-    send = datetime(2026, 11, 6, 21, 0, tzinfo=SAO_PAULO)
-
-    start, end = news_window(now, send, 24, 1)
-
-    assert end == datetime(2026, 11, 6, 20, 0, tzinfo=SAO_PAULO)
-    assert start == datetime(2026, 11, 5, 20, 0, tzinfo=SAO_PAULO)

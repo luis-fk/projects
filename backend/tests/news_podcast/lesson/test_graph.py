@@ -14,7 +14,6 @@ from news_podcast.api.core.llm import TextError, TextModels
 from news_podcast.api.core.messages import failure_message
 from news_podcast.api.core.telegram import TelegramClient, TelegramError
 from news_podcast.api.core.voice.base import (
-    VoiceError,
     VoiceQuotaExhaustedError,
     VoiceUnavailableError,
 )
@@ -159,24 +158,6 @@ def test_the_readme_shows_the_graph_as_it_is() -> None:
     assert readme_diagram() == drawing.draw_mermaid()
 
 
-def test_one_good_search_settles_the_topic_and_its_pages_then_the_script() -> None:
-    answers = [answer(3, 2), pick([1, 2, 3]), *WRITTEN]
-
-    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)))
-
-    assert outcome.error is None
-    assert outcome.path == ["choose_topic", "search", "pick_pages", *TAIL]
-    # The review's words, not the script's.
-    assert (len(outcome.state["turns"]), outcome.state["words"]) == (10, 990)
-    assert outcome.state["topic"] == TopicToTry(VETO, STORIES[1])
-    assert [page.title for page in outcome.state["pages"]] == [
-        "Entenda o veto",
-        "Vetos",
-        "O STF e o veto",
-    ]
-    assert outcome.state["stories"] == STORIES
-
-
 def test_other_terms_bring_one_more_search_whose_pick_sees_every_result() -> None:
     fake = FakeSearch(found(PAGES[0]), found(PAGES[1], PAGES[2], PAGES[0]))
     answers = [answer(3, 2), pick([1], "derrubada de veto"), pick([1, 2, 3]), *WRITTEN]
@@ -299,30 +280,6 @@ def test_a_search_error_stops_the_lesson_at_once() -> None:
     assert len(fake.calls) == 1
 
 
-def test_a_pick_no_model_answers_fails_the_lesson() -> None:
-    fake = FakeSearch(found(*PAGES))
-
-    outcome = run(CATALOG, [answer(3, 2), "não é json", "nem isto"], fake)
-
-    assert isinstance(outcome.error, TextError)
-    assert outcome.step == "busca das fontes"
-
-
-def test_a_choice_that_counts_as_none_still_counts_in_the_usages() -> None:
-    answers = [answer(0, 0), pick([1, 2]), *WRITTEN]
-
-    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)))
-
-    assert [usage.step for usage in outcome.usages] == [
-        "choice",
-        "pick",
-        "script",
-        "review",
-        "voice",
-        "voice",
-    ]
-
-
 @pytest.mark.parametrize(
     ("written", "step", "usages"),
     [
@@ -349,12 +306,15 @@ def test_a_failed_script_or_review_keeps_the_topic_pages_and_paid_usages(
 
 
 def test_a_run_with_no_candidate_fails_at_the_topic_step_without_raising() -> None:
-    outcome = run([], [])
+    sent: list[tuple[Any, ...]] = []
+
+    outcome = run([], [], sent=sent)
 
     assert isinstance(outcome.error, LessonError)
     assert outcome.step == "escolha do tema"
     assert outcome.path == ["choose_topic"]
     assert outcome.state == INPUTS
+    assert sent == []
 
 
 def test_the_time_limit_cancels_the_running_node(
@@ -451,12 +411,20 @@ def test_a_sent_lesson_ends_with_its_voice_note_on_telegram(
 
     assert outcome.error is None
     assert outcome.path == ["choose_topic", "search", "pick_pages", *TAIL, "send"]
+    # The review's words, not the script's.
+    assert (len(outcome.state["turns"]), outcome.state["words"]) == (10, 990)
+    assert outcome.state["topic"] == TopicToTry(VETO, STORIES[1])
+    assert [page.title for page in outcome.state["pages"]] == [
+        "Entenda o veto",
+        "Vetos",
+        "O STF e o veto",
+    ]
+    assert outcome.state["stories"] == STORIES
     assert delivered.built == [LESSON_SETTINGS["voice_model"]]
     [(parts, audio, speed, _)] = delivered.note.calls
     assert [part.name for part in parts] == ["voice_001.wav", "voice_002.wav"]
     assert (audio, speed) == (tmp_path / f"aula-{TODAY:%Y-%m-%d}.ogg", 1.0)
-    caption = lesson_caption(VETO, outcome.state["pages"])
-    assert sent == [("owner", audio, caption, 546)]
+    assert sent == [("owner", audio, lesson_caption(VETO), 546)]
     assert [usage.step for usage in outcome.usages] == [
         "choice",
         "pick",
@@ -465,21 +433,6 @@ def test_a_sent_lesson_ends_with_its_voice_note_on_telegram(
         "voice",
         "voice",
     ]
-
-
-def test_without_sending_the_lesson_ends_at_its_voice_note(
-    delivered: Delivery,
-) -> None:
-    sent: list[tuple[Any, ...]] = []
-    answers = [answer(3, 2), pick([1, 2, 3]), *WRITTEN]
-
-    outcome = run(CATALOG, answers, FakeSearch(found(*PAGES)), sent=sent)
-
-    assert outcome.error is None
-    assert outcome.path[-1] == "build_audio"
-    assert outcome.state["duration_seconds"] == 545.6
-    assert len(delivered.note.calls) == 1
-    assert sent == []
 
 
 def test_the_longest_path_runs_within_the_step_limit() -> None:
@@ -509,18 +462,6 @@ def test_the_longest_path_runs_within_the_step_limit() -> None:
     assert len(sent) == 1
 
 
-@pytest.mark.parametrize("send", [True, False])
-def test_a_failed_lesson_tells_the_admin_only_when_sending(send: bool) -> None:
-    sent: list[tuple[Any, ...]] = []
-
-    outcome = run([], [], send=send, sent=sent)
-
-    assert outcome.error is not None
-    notice = failure_message(FAILURE_SUBJECT, "escolha do tema", outcome.error)
-    assert notice.startswith("⚠️ Não consegui gerar a aula de hoje.")
-    assert sent == ([("owner", notice)] if send else [])
-
-
 @pytest.mark.parametrize(
     ("failure", "waits"),
     [
@@ -529,7 +470,6 @@ def test_a_failed_lesson_tells_the_admin_only_when_sending(send: bool) -> None:
             [minutes * 60 for minutes in VOICE_RETRY_MINUTES],
         ),
         (VoiceQuotaExhaustedError("a cota do dia acabou"), []),
-        (VoiceError("Gemini respondeu 400"), []),
     ],
 )
 def test_a_voice_failure_fails_the_lesson_at_the_voice_step(

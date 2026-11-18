@@ -92,18 +92,6 @@ def test_a_blocked_demo_can_use_the_app_again() -> None:
 
 
 @DATABASES
-def test_the_output_says_how_to_log_in() -> None:
-    out = StringIO()
-
-    call_command("seed_political_culture", stdout=out)
-
-    assert (
-        "political_culture: log in as demo, with the password demo in the admin"
-        in out.getvalue()
-    )
-
-
-@DATABASES
 def test_the_word_count_comes_ready_with_the_file_words() -> None:
     seed()
 

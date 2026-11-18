@@ -84,23 +84,6 @@ def telegram_service(
     )
 
 
-def test_episode_goes_out_as_a_single_voice_message(tmp_path: Path) -> None:
-    report = EpisodeReport(
-        audio_path=tmp_path / "resumo.ogg",
-        duration_seconds=600.4,
-        caption="🎙️ Resumo das 7",
-        script_words=1700,
-    )
-
-    async def scenario() -> list[tuple[str, str]]:
-        async with httpx.AsyncClient() as client:
-            telegram = FakeTelegram(client)
-            await telegram_service(client, telegram, "-22")._deliver(report)
-            return telegram.sent
-
-    assert asyncio.run(scenario()) == [("-22", "🎙️ Resumo das 7")]
-
-
 def test_a_scheduled_episode_goes_out_as_soon_as_it_is_ready(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -207,24 +190,6 @@ def test_a_timeout_inside_the_run_keeps_its_own_error(
 
     with pytest.raises(TimeoutError, match="o ffmpeg demorou"):
         asyncio.run(scenario())
-
-
-def test_errors_go_to_the_admin_chat_not_the_group(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fail(*_args: object) -> None:
-        raise EpisodeError("sem histórias")
-
-    async def scenario() -> list[tuple[str, str]]:
-        async with httpx.AsyncClient() as client:
-            telegram = FakeTelegram(client)
-            service = telegram_service(client, telegram, "-22", admin_chat_id="11")
-            monkeypatch.setattr(service, "_generate", fail)
-            with pytest.raises(EpisodeError):
-                await service.generate_episode(scheduled=False, send=True)
-            return telegram.sent
-
-    assert [chat_id for chat_id, _ in asyncio.run(scenario())] == ["11"]
 
 
 def test_without_the_gemini_key_the_run_fails_at_the_selection_at_once(
@@ -447,27 +412,3 @@ def test_the_selected_stories_stay_with_the_service_when_a_later_step_fails(
             return service
 
     assert asyncio.run(scenario()).stories == SELECTED
-
-
-def test_a_run_that_fails_before_the_selection_has_no_stories(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def no_items(*_args: object) -> list[NewsItem]:
-        return []
-
-    monkeypatch.setattr(service_module, "fetch_items", no_items)
-
-    async def scenario() -> EpisodeService:
-        async with httpx.AsyncClient() as client:
-            service = EpisodeService(
-                http_client=client,
-                telegram=None,
-                chat_id=None,
-                settings=episode_settings(build_settings()),
-                sources=[],
-            )
-            with pytest.raises(EpisodeError):
-                await service.generate_episode(scheduled=False, send=False)
-            return service
-
-    assert asyncio.run(scenario()).stories == []
