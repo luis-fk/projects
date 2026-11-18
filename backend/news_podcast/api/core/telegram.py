@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 
 API_ROOT = "https://api.telegram.org"
 MESSAGE_LIMIT = 4096
-# A caption's visible text, after Telegram reads its HTML, in UTF-16 code units.
-CAPTION_LIMIT = 1024
 UPLOAD_TIMEOUT_SECONDS = 300.0
 DEFAULT_TIMEOUT_SECONDS = 60.0
 CHAT_TYPES = frozenset({"private", "group", "supergroup"})

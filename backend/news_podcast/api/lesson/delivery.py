@@ -49,7 +49,7 @@ async def send_lesson(state: LessonState, context: LessonContext) -> LessonState
     await context.telegram.send_voice(
         context.chat,
         state["audio"],
-        lesson_caption(state["topic"].topic, state["pages"]),
+        lesson_caption(state["topic"].topic),
         round(state["duration_seconds"]),
     )
     return {}

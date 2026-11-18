@@ -424,8 +424,7 @@ def test_a_sent_lesson_ends_with_its_voice_note_on_telegram(
     [(parts, audio, speed, _)] = delivered.note.calls
     assert [part.name for part in parts] == ["voice_001.wav", "voice_002.wav"]
     assert (audio, speed) == (tmp_path / f"aula-{TODAY:%Y-%m-%d}.ogg", 1.0)
-    caption = lesson_caption(VETO, outcome.state["pages"])
-    assert sent == [("owner", audio, caption, 546)]
+    assert sent == [("owner", audio, lesson_caption(VETO), 546)]
     assert [usage.step for usage in outcome.usages] == [
         "choice",
         "pick",

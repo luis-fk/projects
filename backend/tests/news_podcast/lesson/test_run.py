@@ -222,7 +222,7 @@ def test_a_sent_lesson_saves_its_topic_story_and_pages_and_leaves_the_candidates
     [(chat, audio, caption, duration)] = world.sent
     assert (chat, duration) == ("admin", 546)
     assert audio.parent == world.output
-    assert caption.startswith("🎓 <b>Aula · Como o Congresso derruba um veto</b>")
+    assert caption == "🎓 <b>Aula · Como o Congresso derruba um veto</b>"
     assert world.voice_models == [LESSON_SETTINGS["voice_model"]]
     assert world.tavily_keys == ["tavily-test-key"]
     assert [search.closed for search in world.searches] == [True]
