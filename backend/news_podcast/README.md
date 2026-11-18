@@ -297,9 +297,8 @@ The last nodes voice the lesson, build its file and send it (`api/lesson/deliver
   *Settings*. A lesson over 10 minutes still goes out, with a warning to lower the
   maximum minutes or recalibrate `LESSON_WORDS_PER_MINUTE`.
 - **Sending:** one voice message to the chat that gets the notices: your chat with the
-  bot (`TELEGRAM_ADMIN_CHAT_ID`), or `TELEGRAM_CHAT_ID` without it. The caption has the
-  topic, its area and a link to each page under its title, cut so the caption fits
-  Telegram's 1,024 characters.
+  bot (`TELEGRAM_ADMIN_CHAT_ID`), or `TELEGRAM_CHAT_ID` without it. The caption is one
+  line with the topic, as the daily's; the pages stay in the history.
 - **Failures:** the admin chat gets "Não consegui gerar a aula de hoje" with the step
   and the error; with `--no-send`, only the log does. A lesson stops after 90 minutes
   (`MAX_LESSON_MINUTES`).
