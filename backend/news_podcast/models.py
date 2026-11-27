@@ -99,6 +99,18 @@ class PodcastSettings(models.Model):
     fallback_output_price = models.FloatField(
         "output price", validators=[MinValueValidator(0)]
     )
+    second_fallback_model = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Writes the text when the text model and the fallback are "
+        "unavailable. Optional.",
+    )
+    second_fallback_input_price = models.FloatField(
+        "input price", validators=[MinValueValidator(0)]
+    )
+    second_fallback_output_price = models.FloatField(
+        "output price", validators=[MinValueValidator(0)]
+    )
     voice_model = models.CharField(max_length=100)
     voice_input_price = models.FloatField(
         "input price", validators=[MinValueValidator(0)]
@@ -145,7 +157,7 @@ class PodcastSettings(models.Model):
                     f"{MAX_SPEECH_MINUTES} (MAX_SPEECH_MINUTES in api/core/config.py). "
                     "Lower the maximum or the speed."
                 )
-        for name in ("text_model", "fallback_model"):
+        for name in ("text_model", "fallback_model", "second_fallback_model"):
             model = getattr(self, name)
             if isinstance(model, str) and model and (error := model_name_error(model)):
                 errors[name] = error
@@ -174,7 +186,8 @@ class PodcastSettings(models.Model):
         return EpisodeOptions(self.min_minutes, self.max_minutes, self.speech_speed)
 
     def text_models(self) -> list[str]:
-        return [model for model in (self.text_model, self.fallback_model) if model]
+        names = (self.text_model, self.fallback_model, self.second_fallback_model)
+        return [model for model in names if model]
 
     def prices(self) -> dict[str, ModelPrice]:
         rows = [
@@ -183,6 +196,11 @@ class PodcastSettings(models.Model):
                 self.fallback_model,
                 self.fallback_input_price,
                 self.fallback_output_price,
+            ),
+            (
+                self.second_fallback_model,
+                self.second_fallback_input_price,
+                self.second_fallback_output_price,
             ),
             (self.voice_model, self.voice_input_price, self.voice_output_price),
         ]

@@ -74,6 +74,22 @@ def test_without_a_fallback_only_the_text_model_writes() -> None:
     assert "" not in podcast_settings.prices()
 
 
+def test_a_second_fallback_is_asked_last_with_its_own_price() -> None:
+    podcast_settings = build_settings(
+        second_fallback_model="gemini-second-fallback",
+        second_fallback_input_price=0.75,
+        second_fallback_output_price=3.75,
+    )
+
+    podcast_settings.full_clean()
+    assert podcast_settings.text_models() == [
+        "gemini-text",
+        "gemini-fallback",
+        "gemini-second-fallback",
+    ]
+    assert podcast_settings.prices()["gemini-second-fallback"] == ModelPrice(0.75, 3.75)
+
+
 @pytest.mark.parametrize(
     ("values", "field", "message"),
     [
@@ -136,6 +152,7 @@ def test_a_prompt_may_use_its_placeholders_and_doubled_braces() -> None:
         ("fallback_model", "gpt-4.1-mini"),
         ("text_model", "openai:"),
         ("fallback_model", "openai: gpt-4.1-mini"),
+        ("second_fallback_model", "anthropic:claude-x"),
     ],
 )
 def test_a_text_model_needs_a_provider_the_podcast_knows(field: str, name: str) -> None:

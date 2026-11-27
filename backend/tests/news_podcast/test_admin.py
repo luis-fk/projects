@@ -113,12 +113,15 @@ def test_the_settings_form_refuses_an_unknown_placeholder_and_saves_a_change(
     row.refresh_from_db()
     assert row.script_prompt == before
 
-    saved = admin_client.post(url, form_data(row, paused=True, max_minutes=15))
+    changes = {"paused": True, "max_minutes": 15}
+    second = {"second_fallback_model": "gemini-3.7-flash"}
+    saved = admin_client.post(url, form_data(row, **changes, **second))
 
     assert saved.status_code == 302
     row.refresh_from_db()
     assert row.paused
     assert row.max_minutes == 15
+    assert row.second_fallback_model == "gemini-3.7-flash"
 
 
 @DATABASES
