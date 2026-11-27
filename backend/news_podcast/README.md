@@ -140,16 +140,17 @@ save: the admin shows the error on the field.
   (`MAX_SPEECH_MINUTES` in `api/core/config.py`). Each voice request makes about 4
   minutes and the free plan allows 10 requests a day, so 30 minutes take about 8
   requests. On the paid plan, this limit can go up.
-- **Models and prices:** the text model, the fallback (optional) and the voice model,
-  each with its price in US$ per million input and output tokens, from the provider's
-  price list. The history's cost uses these prices, so a new model needs its price. Text
-  models are written `provider:model`, with `google_genai` or `openai`
-  (`google_genai:gemini-3.8-flash`, `openai:gpt-4.1-mini`); a bare name that starts with
-  `gemini` is Google's, and the admin refuses any other provider. To use an OpenAI model,
-  first put `OPENAI_API_KEY` on the cron service, and the prices from OpenAI's price
-  list. The voice model is written the same way, and `google_genai` is the only voice
-  provider for now (`google_genai:gemini-3.8-flash-lite-tts` or the bare
-  `gemini-3.8-flash-lite-tts`); *Adjustments* says how to add another.
+- **Models and prices:** the text model, two fallbacks (optional, asked in that order
+  when the model before them is unavailable) and the voice model, each with its price in
+  US$ per million input and output tokens, from the provider's price list. The history's
+  cost uses these prices, so a new model needs its price. Text models are written
+  `provider:model`, with `google_genai` or `openai` (`google_genai:gemini-3.8-flash`,
+  `openai:gpt-4.1-mini`); a bare name that starts with `gemini` is Google's, and the
+  admin refuses any other provider. To use an OpenAI model, first put `OPENAI_API_KEY`
+  on the cron service, and the prices from OpenAI's price list. The voice model is
+  written the same way, and `google_genai` is the only voice provider for now
+  (`google_genai:gemini-3.8-flash-lite-tts` or the bare `gemini-3.8-flash-lite-tts`);
+  *Adjustments* says how to add another.
 - **Prompts and voice styles:** the selection prompt, the script prompt and the
   lengthening prompt (asked once, when the script comes out short), and the styles of the
   conversation and of the opening headlines. Each prompt accepts only the `{fields}`

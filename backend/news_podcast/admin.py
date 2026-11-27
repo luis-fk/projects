@@ -33,6 +33,8 @@ NUMBERS = [
     "text_output_price",
     "fallback_input_price",
     "fallback_output_price",
+    "second_fallback_input_price",
+    "second_fallback_output_price",
     "voice_input_price",
     "voice_output_price",
 ]
@@ -119,6 +121,11 @@ class PodcastSettingsAdmin(SettingsRowAdmin):
                     ("text_input_price", "text_output_price"),
                     "fallback_model",
                     ("fallback_input_price", "fallback_output_price"),
+                    "second_fallback_model",
+                    (
+                        "second_fallback_input_price",
+                        "second_fallback_output_price",
+                    ),
                     "voice_model",
                     ("voice_input_price", "voice_output_price"),
                 ],
